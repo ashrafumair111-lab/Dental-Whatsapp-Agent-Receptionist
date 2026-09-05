@@ -4,13 +4,13 @@ import asyncio
 import logging
 import os
 import random
-import re
 import time
 from datetime import datetime, timezone
 from typing import Annotated
 
 import httpx
 from livekit.agents import RunContext, llm
+from livekit.agents.beta.workflows import GetEmailTask, GetPhoneNumberTask
 from livekit.agents.llm.tool_context import ToolError
 
 CAL_API_BASE = "https://api.cal.com/v2"
@@ -19,39 +19,23 @@ HTTP_TIMEOUT = 15
 MAX_RETRIES = 3
 BASE_BACKOFF = 1.0
 
-EVENT_TYPE_DISPLAY = {
-    "30min": "General Consultation",
-    "checkup": "Routine Checkup",
-    "follow-up": "Follow-up Consultation",
-    "secret": "Urgent Consultation",
-    "new-patient": "New Patient Registration",
-}
+# MetaByte Solutions offers a single appointment type: Consultations.
+CONSULTATION_SLUG = "30min"
+CONSULTATION_DISPLAY = "Consultations"
 
 _slots_cache: dict[str, tuple[float, list]] = {}
 SLOTS_CACHE_TTL = 30
 
 
-def _slots_cache_key(event_type_slug: str, date: str) -> str:
-    return f"{event_type_slug}:{date}"
-
-
-def _get_cached_slots(event_type_slug: str, date: str) -> list | None:
-    key = _slots_cache_key(event_type_slug, date)
-    entry = _slots_cache.get(key)
+def _get_cached_slots(date: str) -> list | None:
+    entry = _slots_cache.get(date)
     if entry and (time.time() - entry[0]) < SLOTS_CACHE_TTL:
         return entry[1]
     return None
 
 
-def _set_cached_slots(event_type_slug: str, date: str, slots: list) -> None:
-    key = _slots_cache_key(event_type_slug, date)
-    _slots_cache[key] = (time.time(), slots)
-
-
-def _placeholder_email_domain() -> str:
-    company = os.environ.get("COMPANY_NAME", "Hamza Hospital")
-    slug = re.sub(r"[^a-z0-9]", "", company.lower())
-    return f"{slug}.com"
+def _set_cached_slots(date: str, slots: list) -> None:
+    _slots_cache[date] = (time.time(), slots)
 
 
 class CalToolset(llm.Toolset):
@@ -82,22 +66,29 @@ class CalToolset(llm.Toolset):
         }
         last_error: ToolError | None = None
         for attempt in range(MAX_RETRIES):
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                resp = await client.request(
-                    method,
-                    f"{CAL_API_BASE}{path}",
-                    headers=headers,
-                    json=json,
-                    params=params,
-                )
-                if resp.status_code < 400:
-                    return resp.json()
-                last_error = ToolError(f"Cal.com API error ({resp.status_code}): {resp.text}")
-                if resp.status_code == 429 and attempt < MAX_RETRIES - 1:
-                    wait = BASE_BACKOFF * (2 ** attempt) + random.uniform(0, 0.5)
-                    await asyncio.sleep(wait)
-                    continue
-                raise last_error
+            try:
+                async with asyncio.timeout(HTTP_TIMEOUT):
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.request(
+                            method,
+                            f"{CAL_API_BASE}{path}",
+                            headers=headers,
+                            json=json,
+                            params=params,
+                        )
+            except TimeoutError as err:
+                raise ToolError(
+                    "Cal.com is responding slowly right now. Let the caller know and offer to try again in a moment."
+                ) from err
+
+            if resp.status_code < 400:
+                return resp.json()
+            last_error = ToolError(f"Cal.com API error ({resp.status_code}): {resp.text}")
+            if resp.status_code == 429 and attempt < MAX_RETRIES - 1:
+                wait = BASE_BACKOFF * (2 ** attempt) + random.uniform(0, 0.5)
+                await asyncio.sleep(wait)
+                continue
+            raise last_error
         raise last_error  # type: ignore[misc]
 
     async def _get(self, path: str, params: dict | None = None, version: str = CAL_API_VERSION) -> dict:
@@ -109,111 +100,97 @@ class CalToolset(llm.Toolset):
     async def _patch(self, path: str, body: dict, version: str = CAL_API_VERSION) -> dict:
         return await self._request("PATCH", path, json=body, version=version)
 
-    async def sync_event_type_names(self) -> None:
-        data = await self._get("/event-types", {"username": self._username}, version="2024-06-14")
-        for et in data.get("data", []):
-            slug = et["slug"]
-            new_title = EVENT_TYPE_DISPLAY.get(slug)
-            if new_title and et.get("title") != new_title:
-                await self._patch(f"/event-types/{et['id']}", {"title": new_title}, version="2024-06-14")
-
-    @llm.function_tool
-    async def list_event_types(self) -> str:
-        """List all available appointment types offered by the clinic."""
-        data = await self._get("/event-types", {"username": self._username}, version="2024-06-14")
-        types = data.get("data", [])
-        if not types:
-            return "No event types found for this user."
-        lines = []
-        for et in types:
-            slug = et["slug"]
-            display = EVENT_TYPE_DISPLAY.get(slug, et["title"])
-            lines.append(f"- {display} ({et['lengthInMinutes']} min)")
-        return "Available appointment types:\n" + "\n".join(lines)
-
     @llm.function_tool
     async def check_availability(
         self,
         ctx: RunContext,
-        event_type_slug: Annotated[str, "Slug of the event type to check. Options: '30min' (General Consultation), 'checkup' (Routine Checkup), 'follow-up' (Follow-up), 'secret' (Urgent), 'new-patient' (New Patient Registration)."],
         date: Annotated[str, "Date in YYYY-MM-DD format. Defaults to today if not provided."] | None = None,
-        patient_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] = "Asia/Karachi",
+        caller_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] = "Asia/Karachi",
     ) -> str:
-        """Check available time slots for a specific appointment type on a given date.
+        """Check available time slots for a Consultation appointment on a given date.
 
         Args:
-            event_type_slug: The slug of the event type.
             date: The date to check availability for, in YYYY-MM-DD format. Defaults to today.
-            patient_timezone: IANA timezone for slot display (default Asia/Karachi).
+            caller_timezone: IANA timezone for slot display (default Asia/Karachi).
         """
         date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        cached = _get_cached_slots(event_type_slug, date)
+        cached = _get_cached_slots(date)
         if cached is not None:
             slots = cached
         else:
-            await ctx.update(f"Checking availability for {event_type_slug} on {date}.")
+            await ctx.update(f"Checking availability for {date}.")
             params = {
                 "username": self._username,
-                "eventTypeSlug": event_type_slug,
+                "eventTypeSlug": CONSULTATION_SLUG,
                 "start": date,
                 "end": date,
-                "timeZone": patient_timezone,
+                "timeZone": caller_timezone,
             }
             async with ctx.with_filler("One moment, still checking.", delay=2.0, interval=6.0, max_steps=2):
                 data = await self._get("/slots", params=params, version="2024-09-04")
             slots = data.get("data", {}).get(date, [])
-            _set_cached_slots(event_type_slug, date, slots)
+            _set_cached_slots(date, slots)
 
         if not slots:
-            return f"No available slots on {date} for {event_type_slug}."
+            return f"No available slots on {date}."
 
         times = [s["start"] for s in slots]
         first = _format_time(times[0])
         last = _format_time(times[-1])
         return f"Slots on {date}: {first} to {last}, {len(times)} time(s) available."
 
-
-
     @llm.function_tool
     async def create_booking(
         self,
         ctx: RunContext,
-        event_type_slug: Annotated[str, "Slug of the event type to book (e.g. 'checkup', 'follow-up', 'new-patient')"],
         start_time: Annotated[str, "Start time in ISO 8601 UTC format, e.g. '2024-08-13T09:00:00Z'"],
         attendee_name: str,
-        attendee_email: Annotated[str | None, "Email address of the patient. Ask for it first. Only omit if the patient truly doesn't have one."] = None,
         attendee_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] = "Asia/Karachi",
-        attendee_phone: Annotated[str | None, "Phone number in international format"] = None,
-        notes: Annotated[str | None, "Additional notes or reason for the visit"] = None,
+        notes: Annotated[str | None, "Additional notes or reason for the consultation"] = None,
     ) -> str:
-        """Book an appointment for the patient.
+        """Book a Consultation appointment.
+
+        Call this only after the caller has confirmed the date, time, and their
+        name. Do not ask for email or phone number before calling — this tool
+        collects and confirms both itself as part of running.
 
         Args:
-            event_type_slug: The slug of the event type (e.g. 'checkup', 'follow-up').
             start_time: Start time in ISO 8601 UTC format.
-            attendee_name: Full name of the patient.
-            attendee_email: Email address of the patient. Ask first. If unavailable, a placeholder will be used.
-            attendee_timezone: IANA timezone of the patient.
-            attendee_phone: Phone number in international format (optional).
-            notes: Additional notes or reason for the visit (optional).
+            attendee_name: Full name of the caller.
+            attendee_timezone: IANA timezone of the caller.
+            notes: Additional notes or reason for the consultation (optional).
         """
-        resolved_email = attendee_email or f"{attendee_name.lower().replace(' ', '.')}@{_placeholder_email_domain()}"
+        chat_ctx = ctx.session.current_agent.chat_ctx
+        async with ctx.foreground():
+            email_result = await GetEmailTask(
+                chat_ctx=chat_ctx,
+                require_confirmation=True,
+                extra_instructions="Ask for the email to send the booking confirmation to.",
+            )
+            phone_result = await GetPhoneNumberTask(
+                chat_ctx=chat_ctx,
+                require_confirmation=True,
+                extra_instructions="Ask for a phone number where MetaByte Solutions can reach them about this consultation.",
+            )
+
+        resolved_email = email_result.email_address
+        resolved_phone = phone_result.phone_number
+
         body = {
-            "eventTypeSlug": event_type_slug,
+            "eventTypeSlug": CONSULTATION_SLUG,
             "username": self._username,
             "start": start_time,
             "attendee": {
                 "name": attendee_name,
                 "email": resolved_email,
                 "timeZone": attendee_timezone,
+                "phoneNumber": resolved_phone,
             },
         }
-        if attendee_phone:
-            body["attendee"]["phoneNumber"] = attendee_phone
         if notes:
             body["bookingFieldsResponses"] = {"notes": notes}
 
-        await ctx.update(f"Booking the {EVENT_TYPE_DISPLAY.get(event_type_slug, event_type_slug)} appointment now.")
+        await ctx.update("Booking your consultation now.")
         async with ctx.with_filler("One moment, still confirming the booking.", delay=2.0, interval=6.0, max_steps=2):
             data = await self._post("/bookings", body=body)
 
@@ -225,8 +202,9 @@ class CalToolset(llm.Toolset):
             f"Appointment booked successfully!\n"
             f"Booking UID: {uid}\n"
             f"Start: {start}\n"
-            f"Patient: {attendee_name}\n"
-            f"Confirmation sent to {resolved_email}"
+            f"Attendee: {attendee_name}\n"
+            f"Confirmation sent to {resolved_email}\n"
+            f"Contact number: {resolved_phone}"
         )
 
     @llm.function_tool
