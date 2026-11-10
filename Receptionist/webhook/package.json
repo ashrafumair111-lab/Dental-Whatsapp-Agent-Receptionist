@@ -1,0 +1,15 @@
+{
+  "name": "dental-clinic-whatsapp-webhook",
+  "private": true,
+  "type": "module",
+  "description": "Meta WhatsApp Cloud API call webhooks -> LiveKit WhatsApp connector",
+  "scripts": {
+    "dev": "netlify dev"
+  },
+  "dependencies": {
+    "livekit-server-sdk": "^2.19.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

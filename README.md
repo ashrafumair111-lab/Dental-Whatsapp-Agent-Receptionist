@@ -156,9 +156,9 @@ CAL_USERNAME=your_cal_username
 # through LiveKit Inference)
 AI_COUSTICS_API_KEY=...
 
-# Optional — defaults to "Hamza Hospital". Also used to derive the
+# Optional — defaults to "Dental Clinic". Also used to derive the
 # placeholder patient email domain when no email is given.
-COMPANY_NAME="Your Clinic Name"
+COMPANY_NAME="Dental Clinic"
 ```
 
 ### Local Development

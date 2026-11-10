@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Talk to Mike, the Dental Clinic AI receptionist — ask about our dental services or book an appointment." />
+  <title>Mike — Dental Clinic Receptionist</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦷</text></svg>" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background:
+        radial-gradient(1200px 600px at 20% -10%, #173a5f 0%, transparent 55%),
+        radial-gradient(900px 500px at 110% 110%, #0f3d33 0%, transparent 60%),
+        #0b1020;
+      color: #e8ecf4;
+    }
+    .card {
+      width: min(560px, 92vw);
+      padding: 2.5rem 2rem 3rem;
+      text-align: center;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 20px;
+      background: rgba(255, 255, 255, 0.04);
+      backdrop-filter: blur(6px);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.3rem 0.8rem;
+      border-radius: 999px;
+      font-size: 0.8rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(125, 211, 252, 0.14);
+      color: #7dd3fc;
+      border: 1px solid rgba(125, 211, 252, 0.25);
+    }
+    h1 { font-size: 2rem; margin: 1rem 0 0.25rem; letter-spacing: -0.02em; }
+    p.lede { margin: 0.4rem 0 2rem; color: #aab4c8; line-height: 1.55; }
+    .hint { margin-top: 2rem; color: #8a94a8; font-size: 0.85rem; }
+    strong { color: #e8ecf4; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <span class="badge">AI Receptionist</span>
+    <h1>Mike, Dental Clinic</h1>
+    <p class="lede">
+      Ask me about our dental services — check-ups, cleaning, fillings,
+      root canal, and more — or book an appointment right now.
+      Tap the call button in the corner and I'll pick up.
+    </p>
+    <p class="hint">
+      Powered by <strong>LiveKit Cloud</strong> · Voice-first · By text or by voice, whatever you prefer.
+    </p>
+  </main>
+
+  <!-- Agent Embed Widget: generated in LiveKit Cloud dashboard → Agents → your agent → Embed. -->
+  <script src="https://cloud.livekit.io/embed-popup.js" data-lk-agent="CA_rdYxHSMD9jWh"></script>
+</body>
+</html>
