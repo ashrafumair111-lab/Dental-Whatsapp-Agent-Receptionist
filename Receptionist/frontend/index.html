@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="Talk to Mike, the Dental Clinic AI receptionist — ask about our dental services or book an appointment." />
-  <title>Mike — Dental Clinic Receptionist</title>
+  <meta name="description" content="Umair Ashraf Dental Clinic — talk to Mike, our AI receptionist. Ask about dental services or book an appointment by voice or text. Registered business name: UMAIR ASHRAF." />
+  <title>Umair Ashraf Dental Clinic — AI Receptionist</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦷</text></svg>" />
   <style>
     :root { color-scheme: dark; }
@@ -12,8 +12,12 @@
     body {
       margin: 0;
       min-height: 100vh;
-      display: grid;
-      place-items: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1.75rem;
+      padding: 2.5rem 1rem 2rem;
       font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
       background:
         radial-gradient(1200px 600px at 20% -10%, #173a5f 0%, transparent 55%),
@@ -45,15 +49,52 @@
       border: 1px solid rgba(125, 211, 252, 0.25);
     }
     h1 { font-size: 2rem; margin: 1rem 0 0.25rem; letter-spacing: -0.02em; }
+    .clinic-name { margin: 0 0 0.75rem; color: #7dd3fc; font-size: 1rem; letter-spacing: 0.01em; }
     p.lede { margin: 0.4rem 0 2rem; color: #aab4c8; line-height: 1.55; }
     .hint { margin-top: 2rem; color: #8a94a8; font-size: 0.85rem; }
     strong { color: #e8ecf4; }
+
+    footer {
+      width: min(620px, 92vw);
+      padding-top: 1.5rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      text-align: center;
+      font-size: 0.82rem;
+      line-height: 1.7;
+      color: #8a94a8;
+    }
+    footer .legal { color: #e8ecf4; font-size: 0.95rem; letter-spacing: 0.04em; }
+    footer .entity { color: #c8d2e4; }
+    footer address { font-style: normal; }
+    footer a { color: #7dd3fc; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+    footer .meta { margin-top: 0.6rem; font-size: 0.75rem; color: #6c7690; }
   </style>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "Dentist",
+    "name": "Umair Ashraf Dental Clinic",
+    "legalName": "UMAIR ASHRAF",
+    "url": "https://umairashrafdental.com",
+    "telephone": "+92-323-5851608",
+    "email": "umair@umairashrafdental.com",
+    "taxID": "3740563450503",
+    "address": {
+      "@type": "PostalAddress",
+      "streetAddress": "House no 675, Street 11, Abdullah Masjid, Shakrial",
+      "addressLocality": "Rawalpindi",
+      "addressRegion": "Punjab",
+      "addressCountry": "PK"
+    }
+  }
+  </script>
 </head>
 <body>
   <main class="card">
     <span class="badge">AI Receptionist</span>
-    <h1>Mike, Dental Clinic</h1>
+    <h1>Mike, AI Receptionist</h1>
+    <p class="clinic-name">Umair Ashraf Dental Clinic</p>
     <p class="lede">
       Ask me about our dental services — check-ups, cleaning, fillings,
       root canal, and more — or book an appointment right now.
@@ -63,6 +104,20 @@
       Powered by <strong>LiveKit Cloud</strong> · Voice-first · By text or by voice, whatever you prefer.
     </p>
   </main>
+
+  <footer>
+    <p class="legal"><strong>UMAIR ASHRAF</strong></p>
+    <p class="entity">Umair Ashraf Dental Clinic</p>
+    <address>
+      House no 675, Street 11, Abdullah Masjid, Shakrial<br />
+      Rawalpindi, Punjab 46000, Pakistan
+    </address>
+    <p>
+      Phone: <a href="tel:+923235851608">+92 323 5851608</a><br />
+      Email: <a href="mailto:umair@umairashrafdental.com">umair@umairashrafdental.com</a>
+    </p>
+    <p class="meta">NTN: 3740563450503 · Registered sole proprietor business in Rawalpindi, Pakistan</p>
+  </footer>
 
   <!-- Agent Embed Widget: generated in LiveKit Cloud dashboard → Agents → your agent → Embed. -->
   <script src="https://cloud.livekit.io/embed-popup.js" data-lk-agent="CA_rdYxHSMD9jWh"></script>
