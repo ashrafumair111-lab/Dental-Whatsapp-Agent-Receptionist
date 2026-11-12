@@ -249,6 +249,35 @@ wheels = [
 ]
 
 [[package]]
+name = "azure-cognitiveservices-speech"
+version = "1.53.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-core" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6f/89/719c9cdf25311701baf08053c2ecdf194d88ec4528c181554ca710aa6422/azure_cognitiveservices_speech-1.53.0-py3-none-macosx_10_14_x86_64.whl", hash = "sha256:2029c00d762ed519d98dd806d3f0817d27051857ca79156611a33b5efeaab66f", size = 3287354, upload-time = "2026-10-21T23:29:55.147Z" },
+    { url = "https://files.pythonhosted.org/packages/29/a1/ada3f0b5000ac5aac27d96e2cb61c652aa3f95a5fa0710efee9677c3fc55/azure_cognitiveservices_speech-1.53.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:3535d1b4de4ce9f04119c2f5dfdc63bb88276ce446ed28a7ec6e4185426c34a5", size = 3086332, upload-time = "2026-10-21T23:29:57.018Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/87/6ff9d036dff70f25494d63d90760ce8cd302cb4d4c99472d7beeb3ee4f29/azure_cognitiveservices_speech-1.53.0-py3-none-manylinux1_x86_64.whl", hash = "sha256:e41a909b3480f6e12337c96f3f8cc6c8ea18cf263fee500158e49fd7b5eaa65c", size = 2692182, upload-time = "2026-10-21T23:29:58.925Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/8e/671f25453e14fc8dd45cd8bdf15dde7605a4852ccea4a62fa83ec6d80789/azure_cognitiveservices_speech-1.53.0-py3-none-manylinux2014_aarch64.whl", hash = "sha256:688badb3efbb7d424aba67996225adf8762be32bbeb1e27dda87fdbd26b192de", size = 2653091, upload-time = "2026-10-21T23:30:00.359Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/db/0ddbf3a6ef8e15e140855e2c7cdb5053e6ac4ffc34d2a521b673a2dcc7b9/azure_cognitiveservices_speech-1.53.0-py3-none-win_amd64.whl", hash = "sha256:30c9d87c6cd0b895848a29bf1789d4ab8b64021bdd909a36482b8a9aa1292c8f", size = 2415128, upload-time = "2026-10-21T23:30:01.83Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/ef/b3a0b3f183b2841d81d4d17fadbabf73c8415a825083518cb725430ed495/azure_cognitiveservices_speech-1.53.0-py3-none-win_arm64.whl", hash = "sha256:dfaecb0c1a102b180536350b241f46055c156a88d45e79e823003128d99ca256", size = 2248064, upload-time = "2026-10-21T23:30:03.206Z" },
+]
+
+[[package]]
+name = "azure-core"
+version = "1.41.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/f3/b416179e408990df5db0d516283022dde0f5d0111d98c1a848e41853e81c/azure_core-1.41.0.tar.gz", hash = "sha256:f46ff5dfcd230f25cf1c19e8a34b8dc08a337b2503e268bb600a16c00db8ad5a", size = 381042, upload-time = "2026-05-07T23:30:54.302Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/db/325c6d7312d2200251c52323878281045aaffcb5586612296484e4280eaa/azure_core-1.41.0-py3-none-any.whl", hash = "sha256:522b4011e8180b1a3dcd2024396a4e7fe9ac37fb8597db47163d230b5efe892d", size = 220920, upload-time = "2026-05-07T23:30:56.357Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2026.5.20"
 source = { registry = "https://pypi.org/simple" }
@@ -861,6 +890,9 @@ codecs = [
 images = [
     { name = "pillow" },
 ]
+openai = [
+    { name = "livekit-plugins-openai" },
+]
 
 [[package]]
 name = "livekit-api"
@@ -944,6 +976,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/44/fb/a13307fcd74a15903537d51f8e24078073d5a9b408643fdf60165328a0b1/livekit_plugins_ai_coustics-0.2.15-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:aab3ba0403680471530adfe8fa4460222d315f3a4b1bc3a741018b727c46ee18", size = 70343065, upload-time = "2026-05-22T15:06:52.682Z" },
     { url = "https://files.pythonhosted.org/packages/dd/94/0fa72899cb0eb35722faed75562b70afa7aa4e23f2eed1944145e171b05a/livekit_plugins_ai_coustics-0.2.15-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:cfa3dc21d810625c0eab962da8728329b1ca5598caa23267c57082e869780f0c", size = 70686031, upload-time = "2026-05-22T15:06:56.56Z" },
     { url = "https://files.pythonhosted.org/packages/55/b3/392f4c6cbf6b9d8e1f6f4e61116dbf521e873a4e6d6f80dc3315268bb5d5/livekit_plugins_ai_coustics-0.2.15-cp310-abi3-win_amd64.whl", hash = "sha256:b961901c511be28add75c7ef584c2d31d07072975fceab4b03a0dd70e1c5855b", size = 70098340, upload-time = "2026-05-22T15:07:00.203Z" },
+]
+
+[[package]]
+name = "livekit-plugins-azure"
+version = "1.8.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "azure-cognitiveservices-speech" },
+    { name = "httpx2" },
+    { name = "livekit-agents", extra = ["openai"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/7a/a9b3b196263f4dcffdbd9066c72003df6ffee32621553cec35492cdc4e0f/livekit_plugins_azure-1.8.11.tar.gz", hash = "sha256:be061a76cedded55284e1c7790b8bfcd7017e51c4ea73b23a1b508876aee2ac5", size = 32800, upload-time = "2026-11-05T19:45:27.281Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/e9/43f181c31ab8edb6608df9b98286e76b606562dc59f87d4af882052fab10/livekit_plugins_azure-1.8.11-py3-none-any.whl", hash = "sha256:38b85ed04154a03d4cec36cd8f6fe407dfd052a31114a1dab290649df50a466b", size = 36631, upload-time = "2026-11-05T19:45:25.998Z" },
 ]
 
 [[package]]
@@ -1882,6 +1928,7 @@ dependencies = [
     { name = "httpx" },
     { name = "livekit-agents" },
     { name = "livekit-plugins-ai-coustics" },
+    { name = "livekit-plugins-azure" },
     { name = "livekit-plugins-deepgram" },
     { name = "livekit-plugins-openai" },
     { name = "livekit-plugins-silero" },
@@ -1903,6 +1950,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "livekit-agents", specifier = ">=1.8.11" },
     { name = "livekit-plugins-ai-coustics", specifier = ">=0.2" },
+    { name = "livekit-plugins-azure", specifier = ">=1.8" },
     { name = "livekit-plugins-deepgram", specifier = ">=1.8" },
     { name = "livekit-plugins-openai", specifier = ">=1.8" },
     { name = "livekit-plugins-silero", specifier = ">=0.10" },

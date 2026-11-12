@@ -7,6 +7,7 @@ dependencies = [
     "livekit-plugins-silero>=0.10",
     "livekit-plugins-ai-coustics>=0.2",
     "livekit-plugins-deepgram>=1.8",
+    "livekit-plugins-azure>=1.8",
     "livekit-plugins-openai>=1.8",
     "edge-tts>=6.1",
     "av>=12.0",

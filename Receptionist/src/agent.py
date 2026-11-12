@@ -25,7 +25,7 @@ from livekit.agents import (
 )
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.metrics import LLMMetrics, STTMetrics, TTSMetrics
-from livekit.plugins import ai_coustics, deepgram, openai, silero
+from livekit.plugins import ai_coustics, azure, deepgram, openai, silero
 
 from cal_tools import CalToolset
 from edge_tts_plugin import EdgeTTS
@@ -61,12 +61,17 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
 LLM_FALLBACK_MODEL = os.environ.get("LLM_FALLBACK_MODEL", "openai/gpt-oss-120b")
 GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
-# TTS: Deepgram Aura for English, Microsoft Edge for Urdu (native ur-PK voice).
+# TTS: Deepgram Aura for English, Azure Speech neural voice for Urdu (native
+# ur-PK-AsadNeural). Falls back to Microsoft Edge for Urdu if Azure is down —
+# Edge is free but its 48kbps MP3 sounds "cut up" on WhatsApp calls.
 # `TTS_MODEL` is only used by the legacy LiveKit-Inference path.
 TTS_MODEL = os.environ.get("TTS_MODEL", "inworld/inworld-tts-2-flash")
 TTS_EN_MODEL = os.environ.get("TTS_EN_MODEL", "aura-2-odysseus-en")
 TTS_UR_VOICE = os.environ.get("TTS_UR_VOICE", "ur-PK-AsadNeural")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "").strip()
+AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY", "").strip()
+AZURE_SPEECH_REGION = os.environ.get("AZURE_SPEECH_REGION", "").strip()
+_USE_AZURE_TTS = bool(AZURE_SPEECH_KEY and AZURE_SPEECH_REGION)
 # Deepgram STT starts in `multi` (English is perfect, Urdu comes back as Hindi /
 # Arabic script) and switches to `ur` as soon as the caller is heard speaking
 # Urdu — `ur` is far more accurate but cannot transcribe English at all.
@@ -439,7 +444,7 @@ class BilingualTTS(tts_mod.TTS):
 
 
 def _build_tts() -> tts_mod.TTS:
-    """Deepgram Aura (English) + Edge native Urdu, or the legacy inference TTS."""
+    """Deepgram Aura (English) + Azure native Urdu (Edge fallback), or legacy inference."""
     if _USE_DEEPGRAM:
         english = deepgram.TTS(
             model=TTS_EN_MODEL,
@@ -447,7 +452,21 @@ def _build_tts() -> tts_mod.TTS:
             speed=max(0.7, min(1.5, TTS_SPEED)),
             api_key=DEEPGRAM_API_KEY,
         )
-        urdu = EdgeTTS(voice=TTS_UR_VOICE, rate=TTS_SPEED, fallback=english)
+        if _USE_AZURE_TTS:
+            # Azure's ur-PK-AsadNeural is the target voice — clean 24 kHz stream.
+            # If Azure errors, the call falls back to Edge so the caller is never
+            # left in silence.
+            azure_urdu = azure.TTS(
+                voice=TTS_UR_VOICE,
+                language="ur-PK",
+                sample_rate=24000,
+                speech_key=AZURE_SPEECH_KEY,
+                speech_region=AZURE_SPEECH_REGION,
+            )
+            edge_urdu = EdgeTTS(voice=TTS_UR_VOICE, rate=TTS_SPEED)
+            urdu = tts_mod.FallbackAdapter([azure_urdu, edge_urdu], sample_rate=24000)
+        else:
+            urdu = EdgeTTS(voice=TTS_UR_VOICE, rate=TTS_SPEED, fallback=english)
         return BilingualTTS(english=english, urdu=urdu)
 
     start_voice = TTS_VOICE_UR if START_LANGUAGE == "ur" else TTS_VOICE_EN
