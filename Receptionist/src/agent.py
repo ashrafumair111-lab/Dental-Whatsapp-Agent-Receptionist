@@ -69,7 +69,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 # Edge is free but its 48kbps MP3 sounds "cut up" on WhatsApp calls.
 # `TTS_MODEL` is only used by the legacy LiveKit-Inference path.
 TTS_MODEL = os.environ.get("TTS_MODEL", "inworld/inworld-tts-2-flash")
-TTS_EN_MODEL = os.environ.get("TTS_EN_MODEL", "aura-2-odysseus-en")
+TTS_EN_MODEL = os.environ.get("TTS_EN_MODEL", "aura-2-arcas-en")
 TTS_UR_VOICE = os.environ.get("TTS_UR_VOICE", "ur-PK-AsadNeural")
 DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "").strip()
 AZURE_SPEECH_KEY = os.environ.get("AZURE_SPEECH_KEY", "").strip()
