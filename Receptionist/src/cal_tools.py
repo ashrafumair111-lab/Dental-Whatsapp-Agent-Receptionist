@@ -227,10 +227,12 @@ class CalToolset(llm.Toolset):
         self,
         ctx: RunContext,
         date: Annotated[str, "Date in YYYY-MM-DD format. Defaults to today if not provided."] | None = None,
-        caller_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] = "Asia/Karachi",
+        caller_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] | None = "Asia/Karachi",
     ) -> str:
         """Check available dental appointment slots for a date (defaults to today)."""
         date = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # Models sometimes emit null here — never let a null reach the API/cache key.
+        caller_timezone = (caller_timezone or "Asia/Karachi").strip() or "Asia/Karachi"
         cache_key = f"{date}|{caller_timezone}"
         cached = _get_cached_slots(cache_key)
         if cached is not None:
