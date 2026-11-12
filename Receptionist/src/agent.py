@@ -239,8 +239,16 @@ LANG_MODE = os.environ.get("LANG_MODE", "auto").strip().lower()
 START_LANGUAGE = "en" if LANG_MODE == "en" else "ur"
 
 
-def _detect_language(text: str, stt_language: str | None = None) -> str:
-    """Return "ur" or "en" for one caller turn."""
+def _detect_language(
+    text: str, stt_language: str | None = None, current: str | None = None
+) -> str:
+    """Return "ur" or "en" for one caller turn.
+
+    `current` is the language the call is currently in. Urdu has the stronger
+    pull — a stray short Latin turn ("okay", "appointment") in the middle of an
+    Urdu conversation must NOT flip the voice to English; switch to English
+    only on a clearly English turn (4+ Latin words, no Urdu evidence).
+    """
     if _URDU_SCRIPT.search(text) or _DEVANAGARI_SCRIPT.search(text):
         return "ur"
     code = str(stt_language or "").lower()
@@ -250,6 +258,8 @@ def _detect_language(text: str, stt_language: str | None = None) -> str:
     words = re.findall(r"[a-z']+", text.lower())
     if any(word in _ROMAN_URDU_HINTS for word in words):
         return "ur"
+    if current == "ur" and len(words) < 4:
+        return "ur"  # too little evidence to abandon Urdu
     return "en"
 
 
@@ -343,7 +353,9 @@ def _log_turn_timing(session: AgentSession, lang_state: dict) -> dict:
         if final and text:
             # Only finals switch the voice — interims flap and would make the
             # agent change accent mid-reply.
-            language = _detect_language(text, getattr(ev, "language", None))
+            language = _detect_language(
+                text, getattr(ev, "language", None), lang_state.get("lang")
+            )
             logger.info("LANG | detected %s from %r", language, text)
             _set_tts_language(session, language, lang_state)
             stt_target = _stt_switch_target(text)
@@ -386,6 +398,25 @@ class LowLatencyTTS(inference.TTS):
         super()._set_expressive(False)
 
 
+def _route_text(text: str, fallback: str) -> str:
+    """Pick which engine speaks this sentence.
+
+    The session language is only a starting hint — the text decides, so a fully
+    English reply in an Urdu conversation still gets the English voice. Roman
+    Urdu (Latin script) keeps the Urdu voice, because reading Roman Urdu with
+    an English voice is exactly the accent callers complain about.
+    """
+    if _URDU_SCRIPT.search(text) or _DEVANAGARI_SCRIPT.search(text):
+        return "ur"
+    words = re.findall(r"[a-z']+", text.lower())
+    if not words:
+        # Digits/punctuation only — keep the session's language.
+        return fallback
+    if any(word in _ROMAN_URDU_HINTS for word in words):
+        return "ur"
+    return "en"
+
+
 class BilingualTTS(tts_mod.TTS):
     """Route each reply to an English or Urdu engine.
 
@@ -423,8 +454,9 @@ class BilingualTTS(tts_mod.TTS):
             code = str(language).lower()
             self._language = "ur" if code.startswith(("ur", "hi")) else "en"
 
-    def _active(self) -> tts_mod.TTS:
-        return self._urdu if self._language == "ur" else self._english
+    def _active(self, text: str | None = None) -> tts_mod.TTS:
+        lang = _route_text(text, self._language) if text is not None else self._language
+        return self._urdu if lang == "ur" else self._english
 
     def synthesize(
         self,
@@ -432,7 +464,7 @@ class BilingualTTS(tts_mod.TTS):
         *,
         conn_options=DEFAULT_API_CONNECT_OPTIONS,  # type: ignore[assignment]
     ) -> tts_mod.ChunkedStream:
-        return self._active().synthesize(text, conn_options=conn_options)
+        return self._active(text).synthesize(text, conn_options=conn_options)
 
     def prewarm(self) -> None:
         self._english.prewarm()
@@ -453,15 +485,19 @@ def _build_tts() -> tts_mod.TTS:
             api_key=DEEPGRAM_API_KEY,
         )
         if _USE_AZURE_TTS:
+            from livekit.plugins.azure.tts import ProsodyConfig
+
             # Azure's ur-PK-AsadNeural is the target voice — clean 24 kHz stream.
-            # If Azure errors, the call falls back to Edge so the caller is never
-            # left in silence.
+            # Rate slightly raised: the default cadence read as slow/robotic on
+            # WhatsApp calls. If Azure errors, the call falls back to Edge so
+            # the caller is never left in silence.
             azure_urdu = azure.TTS(
                 voice=TTS_UR_VOICE,
                 language="ur-PK",
                 sample_rate=24000,
                 speech_key=AZURE_SPEECH_KEY,
                 speech_region=AZURE_SPEECH_REGION,
+                prosody=ProsodyConfig(rate=max(0.5, min(2.0, TTS_SPEED))),
             )
             edge_urdu = EdgeTTS(voice=TTS_UR_VOICE, rate=TTS_SPEED)
             urdu = tts_mod.FallbackAdapter([azure_urdu, edge_urdu], sample_rate=24000)
