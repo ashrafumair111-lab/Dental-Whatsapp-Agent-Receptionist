@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import AsyncIterable
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
@@ -13,16 +14,21 @@ from livekit.agents import (
     AgentSession,
     Agent,
     BackgroundAudioPlayer,
+    DEFAULT_API_CONNECT_OPTIONS,
     JobProcess,
+    ModelSettings,
     TurnHandlingOptions,
     inference,
+    llm as llm_mod,
     room_io,
+    tts as tts_mod,
 )
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.metrics import LLMMetrics, STTMetrics, TTSMetrics
-from livekit.plugins import ai_coustics, silero
+from livekit.plugins import ai_coustics, deepgram, openai, silero
 
 from cal_tools import CalToolset
+from edge_tts_plugin import EdgeTTS
 
 logger = logging.getLogger("metrics")
 logger.setLevel(logging.INFO)
@@ -47,9 +53,27 @@ def _env_number(name: str, default, cast=float):
 TTS_SPEED = _env_number("TTS_SPEED", 1.0, float)
 ENDPOINTING_MAX_DELAY = _env_number("ENDPOINTING_MAX_DELAY", 0.7, float)
 LLM_MAX_TOKENS = _env_number("LLM_MAX_TOKENS", 120, int)
-STT_MODEL = os.environ.get("STT_MODEL", "assemblyai/universal-streaming")
-LLM_MODEL = os.environ.get("LLM_MODEL", "google/gemini-3.1-flash-lite")
+STT_MODEL = os.environ.get("STT_MODEL", "deepgram/nova-3")
+# LLM: Groq (OpenAI-compatible) with the free OpenAI-compatible plugin. Groq's
+# free tier is 1,000 requests/day; the fallback model gives us a second bucket
+# so a burst can never leave the caller in silence.
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
+LLM_FALLBACK_MODEL = os.environ.get("LLM_FALLBACK_MODEL", "openai/gpt-oss-120b")
+GROQ_BASE_URL = os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+# TTS: Deepgram Aura for English, Microsoft Edge for Urdu (native ur-PK voice).
+# `TTS_MODEL` is only used by the legacy LiveKit-Inference path.
 TTS_MODEL = os.environ.get("TTS_MODEL", "inworld/inworld-tts-2-flash")
+TTS_EN_MODEL = os.environ.get("TTS_EN_MODEL", "aura-2-odysseus-en")
+TTS_UR_VOICE = os.environ.get("TTS_UR_VOICE", "ur-PK-AsadNeural")
+DEEPGRAM_API_KEY = os.environ.get("DEEPGRAM_API_KEY", "").strip()
+# Deepgram STT starts in `multi` (English is perfect, Urdu comes back as Hindi /
+# Arabic script) and switches to `ur` as soon as the caller is heard speaking
+# Urdu — `ur` is far more accurate but cannot transcribe English at all.
+STT_START_LANGUAGE = os.environ.get("STT_LANGUAGE", "multi")
+
+_USE_DEEPGRAM = bool(DEEPGRAM_API_KEY)
+_USE_GROQ = bool(GROQ_API_KEY)
 # Cartesia is the premium voice; the Inworld/Sonic switch is env-driven so the
 # pipeline can be moved between models without a code change.
 _IS_CARTESIA = TTS_MODEL.lower().startswith("cartesia")
@@ -178,15 +202,50 @@ async def _display_stt_metrics(metrics: STTMetrics) -> None:
     )
 
 
+# Urdu and Hindi share most of the spoken vocabulary patients use here, and the
+# STT often returns Urdu speech in Devanagari. Treat both scripts as "speak Urdu".
 _URDU_SCRIPT = re.compile(r"[\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]")
+_DEVANAGARI_SCRIPT = re.compile(r"[\u0900-\u097F]")
 
-# Per-language voices (Cartesia). English default keeps Blake; set TTS_VOICE_UR
-# to a native Urdu male voice ID from Cartesia's voice library to fix Urdu accents.
-TTS_VOICE_EN = os.environ.get("TTS_VOICE_EN", _DEFAULT_VOICE)  # Blake (Cartesia) / Alex (Inworld) — adult male
-TTS_VOICE_UR = os.environ.get("TTS_VOICE_UR", TTS_VOICE_EN)
-# "en" (default): always speak English. "urdu": always Urdu + native Urdu voice.
-# "auto": EN/UR switch based on the transcript's script.
-LANG_MODE = os.environ.get("LANG_MODE", "en").strip().lower()
+# Roman-Urdu words a Pakistani caller uses constantly. Only a fallback for when
+# the STT hands back Latin script even though the caller is speaking Urdu.
+_ROMAN_URDU_HINTS = frozenset(
+    {
+        "kya", "kyun", "kaise", "kahan", "kab", "kitna", "kitne", "kitni",
+        "nahi", "nahin", "hai", "hain", "hoon", "hun", "hoga", "hogi",
+        "mujhe", "mera", "meri", "aap", "aapka", "aapki", "apna", "apni",
+        "chahiye", "chahiya", "karna", "karni", "karne", "kardo", "karde",
+        "baje", "kal", "aaj", "parso", "theek", "thik", "acha", "achha",
+        "shukriya", "meherbani", "bhai", "salaam", "assalam", "zaroor",
+        "bilkul", "matlab", "abhi", "phir", "bas", "haan", "jee", "gaye",
+        "dena", "dein", "lena", "lein", "milna", "milega", "chahta", "chahti",
+    }
+)
+
+# Per-language voices. With Deepgram the English voice is a voice model name and
+# Urdu is an Edge voice; the router below picks one per reply.
+TTS_VOICE_EN = os.environ.get("TTS_VOICE_EN", _DEFAULT_VOICE)
+TTS_VOICE_UR = os.environ.get(
+    "TTS_VOICE_UR", TTS_UR_VOICE if _USE_DEEPGRAM else TTS_VOICE_EN
+)
+# "auto" (default): follow the caller's language. "en"/"urdu": pin one language.
+LANG_MODE = os.environ.get("LANG_MODE", "auto").strip().lower()
+# The greeting is spoken in Urdu, so an auto session starts on the Urdu voice.
+START_LANGUAGE = "en" if LANG_MODE == "en" else "ur"
+
+
+def _detect_language(text: str, stt_language: str | None = None) -> str:
+    """Return "ur" or "en" for one caller turn."""
+    if _URDU_SCRIPT.search(text) or _DEVANAGARI_SCRIPT.search(text):
+        return "ur"
+    code = str(stt_language or "").lower()
+    if code.startswith(("ur", "hi")):
+        return "ur"
+    # Latin-script Urdu: trust the words over an STT "en" guess.
+    words = re.findall(r"[a-z']+", text.lower())
+    if any(word in _ROMAN_URDU_HINTS for word in words):
+        return "ur"
+    return "en"
 
 
 def _set_tts_language(session: AgentSession, language: str, state: dict) -> None:
@@ -194,7 +253,7 @@ def _set_tts_language(session: AgentSession, language: str, state: dict) -> None
     if LANG_MODE == "urdu":
         language = "ur"  # never switch away from Urdu
     elif LANG_MODE == "en":
-        language = "en"  # never switch away from English (production default)
+        language = "en"  # English-only build
     voice = TTS_VOICE_UR if language == "ur" else TTS_VOICE_EN
     if state.get("lang") == language and state.get("voice") == voice:
         return
@@ -207,7 +266,49 @@ def _set_tts_language(session: AgentSession, language: str, state: dict) -> None
         logger.warning("TTS language/voice switch to %s failed: %s", language, exc)
 
 
-def _log_turn_timing(session: AgentSession) -> None:
+def _stt_switch_target(text: str) -> str | None:
+    """Return the Deepgram language the next utterance should use, or None.
+
+    Only finals call this. Urdu/Hindi script (or Roman-Urdu words) means the
+    caller speaks Urdu → `ur` transcribes it properly. Plain English text means
+    `multi`, which handles English natively and also catches Indian-English.
+    """
+    if _URDU_SCRIPT.search(text) or _DEVANAGARI_SCRIPT.search(text):
+        return "ur"
+    words = re.findall(r"[a-z']+", text.lower())
+    if len(words) < 2:
+        return None  # too short to judge ("ok", "yes")
+    if any(word in _ROMAN_URDU_HINTS for word in words):
+        return "ur"
+    return "multi"
+
+
+def _set_stt_language(session: AgentSession, language: str, state: dict) -> None:
+    """Repoint Deepgram at the caller's language, once per change.
+
+    The plugin defers the reconnect to the end of the current utterance, so
+    switching never cuts the caller off mid-sentence.
+    """
+    if state.get("stt") == language:
+        return
+    if not hasattr(session.stt, "update_options"):
+        return
+    state["stt"] = language
+    try:
+        session.stt.update_options(language=language)
+        logger.info("STT | language → %s", language)
+    except Exception as exc:  # never break the call over a language switch
+        logger.warning("STT language switch to %s failed: %s", language, exc)
+
+
+def _greeting_text() -> str:
+    """First line of the call, in the session's starting language."""
+    if START_LANGUAGE == "en":
+        return f"Hi, this is Mike from {_company_name} — how can I help?"
+    return "السلام علیکم! یہ عمر اشرف ڈینٹل کلینک ہے، میں مائیک ہوں۔ بتائیے، کیا مدد کر سکتا ہوں؟"
+
+
+def _log_turn_timing(session: AgentSession, lang_state: dict) -> dict:
     """Log gaps between turn boundaries so latency can be attributed from logs.
 
     One turn reads: user_listening (caller stopped) -> transcript_final ->
@@ -215,7 +316,6 @@ def _log_turn_timing(session: AgentSession) -> None:
     second covers turn detection + LLM request start. No behaviour change.
     """
     last = {"t": time.monotonic()}
-    lang_state: dict = {"lang": "en", "voice": TTS_VOICE_EN}  # session starts in English
 
     def _mark(event: str) -> None:
         now = time.monotonic()
@@ -235,9 +335,20 @@ def _log_turn_timing(session: AgentSession) -> None:
         final = getattr(ev, "is_final", False)
         text = getattr(ev, "transcript", "")
         logger.info("STT | %s | %r", "final" if final else "interim", text)
-        _set_tts_language(session, "ur" if _URDU_SCRIPT.search(text) else "en", lang_state)
-        if final:
+        if final and text:
+            # Only finals switch the voice — interims flap and would make the
+            # agent change accent mid-reply.
+            language = _detect_language(text, getattr(ev, "language", None))
+            logger.info("LANG | detected %s from %r", language, text)
+            _set_tts_language(session, language, lang_state)
+            stt_target = _stt_switch_target(text)
+            if stt_target:
+                _set_stt_language(session, stt_target, lang_state)
             _mark("transcript_final")
+        elif not final:
+            _mark("transcript_interim")
+
+    return lang_state
 
 
 # Compact replacement for the ~3,100-character Cartesia markup guide that the
@@ -270,24 +381,167 @@ class LowLatencyTTS(inference.TTS):
         super()._set_expressive(False)
 
 
+class BilingualTTS(tts_mod.TTS):
+    """Route each reply to an English or Urdu engine.
+
+    Both engines are 24 kHz mono PCM. Urdu text is spoken by a native Urdu voice
+    and English text by the English voice, so neither language is read with the
+    other's accent. `update_options(language=...)` is what the session calls
+    before each reply (see `_set_tts_language`), so routing costs nothing.
+    """
+
+    def __init__(self, *, english: tts_mod.TTS, urdu: tts_mod.TTS) -> None:
+        super().__init__(
+            capabilities=tts_mod.TTSCapabilities(streaming=False),
+            sample_rate=english.sample_rate,
+            num_channels=1,
+        )
+        self._english = english
+        self._urdu = urdu
+        self._language = "en"
+
+    @property
+    def model(self) -> str:
+        return self._active().model
+
+    @property
+    def provider(self) -> str:
+        return self._active().provider
+
+    @property
+    def language(self) -> str:
+        return self._language
+
+    def update_options(self, **kwargs) -> None:
+        language = kwargs.get("language")
+        if language is not None:
+            code = str(language).lower()
+            self._language = "ur" if code.startswith(("ur", "hi")) else "en"
+
+    def _active(self) -> tts_mod.TTS:
+        return self._urdu if self._language == "ur" else self._english
+
+    def synthesize(
+        self,
+        text: str,
+        *,
+        conn_options=DEFAULT_API_CONNECT_OPTIONS,  # type: ignore[assignment]
+    ) -> tts_mod.ChunkedStream:
+        return self._active().synthesize(text, conn_options=conn_options)
+
+    def prewarm(self) -> None:
+        self._english.prewarm()
+        self._urdu.prewarm()
+
+    async def aclose(self) -> None:
+        await self._english.aclose()
+        await self._urdu.aclose()
+
+
+def _build_tts() -> tts_mod.TTS:
+    """Deepgram Aura (English) + Edge native Urdu, or the legacy inference TTS."""
+    if _USE_DEEPGRAM:
+        english = deepgram.TTS(
+            model=TTS_EN_MODEL,
+            sample_rate=24000,
+            speed=max(0.7, min(1.5, TTS_SPEED)),
+            api_key=DEEPGRAM_API_KEY,
+        )
+        urdu = EdgeTTS(voice=TTS_UR_VOICE, rate=TTS_SPEED, fallback=english)
+        return BilingualTTS(english=english, urdu=urdu)
+
+    start_voice = TTS_VOICE_UR if START_LANGUAGE == "ur" else TTS_VOICE_EN
+    if _IS_CARTESIA:
+        return LowLatencyTTS(
+            TTS_MODEL,
+            voice=start_voice,
+            language=START_LANGUAGE,
+            extra_kwargs={"speed": TTS_SPEED},
+        )
+    tts_kwargs = {}
+    if TTS_MODEL.lower().startswith("inworld"):
+        tts_kwargs["extra_kwargs"] = {"speaking_rate": TTS_SPEED}
+    return inference.TTS(
+        TTS_MODEL,
+        voice=start_voice,
+        language=START_LANGUAGE,
+        **tts_kwargs,
+    )
+
+
+def _build_stt() -> object:
+    if _USE_DEEPGRAM:
+        model = STT_MODEL.split("/", 1)[1] if "/" in STT_MODEL else STT_MODEL
+        return deepgram.STT(
+            model=model,
+            language=STT_START_LANGUAGE,
+            interim_results=True,
+            punctuate=True,
+            smart_format=True,
+            filler_words=False,
+            no_delay=True,
+            endpointing_ms=25,
+            api_key=DEEPGRAM_API_KEY,
+        )
+
+    # Universal-3.x Pro detects the spoken language and code-switches by itself.
+    # Passing a fixed `language` would pin it and break Urdu, so only English-only
+    # / single-language models get one.
+    auto_language = STT_MODEL.lower().startswith(
+        ("assemblyai/universal-3", "assemblyai/universal-streaming-multilingual")
+    )
+    stt_kwargs: dict = {"model": STT_MODEL}
+    if not auto_language:
+        stt_kwargs["language"] = "en"
+    return inference.STT(**stt_kwargs)
+
+
+def _build_llm() -> llm_mod.LLM:
+    if not _USE_GROQ:
+        return inference.LLM(
+            model="google/gemini-3.1-flash-lite",
+            inference_class="priority",
+            extra_kwargs={"max_completion_tokens": LLM_MAX_TOKENS},
+        )
+
+    def _groq(model: str) -> openai.LLM:
+        return openai.LLM(
+            model=model,
+            api_key=GROQ_API_KEY,
+            base_url=GROQ_BASE_URL,
+            max_completion_tokens=LLM_MAX_TOKENS,
+            temperature=0.4,
+        )
+
+    primary = _groq(LLM_MODEL)
+    if not LLM_FALLBACK_MODEL or LLM_FALLBACK_MODEL == LLM_MODEL:
+        return primary
+    # Free tiers rate-limit per model, so the fallback gets its own bucket and a
+    # 429 on the primary never leaves the caller in silence.
+    return llm_mod.FallbackAdapter([primary, _groq(LLM_FALLBACK_MODEL)], attempt_timeout=8.0)
+
+
 def _turn_detection():
     """Choose how end-of-turn is decided.
 
-    Default is the semantic TurnDetector (``model``), matching the proven
-    production build. On noisy phone lines its finals can be slow; set
-    ``TURN_DETECTION=vad`` to commit the turn on audio alone instead.
+    Default is ``vad``: the semantic TurnDetector runs on LiveKit Inference, and
+    this project has no inference credit. ``model`` is still available for a
+    paid/inference-backed build.
     """
-    mode = os.environ.get("TURN_DETECTION", "model").strip().lower()
+    mode = os.environ.get("TURN_DETECTION", "vad").strip().lower()
     if mode in {"model", "detector", "turn_detector", "streaming"}:
         return inference.TurnDetector()
     if mode not in {"vad", "stt", "manual"}:
-        logger.warning("Ignoring invalid TURN_DETECTION=%r; using 'model'", mode)
-        return inference.TurnDetector()
+        logger.warning("Ignoring invalid TURN_DETECTION=%r; using 'vad'", mode)
+        return "vad"
     return mode
 
 
 class Assistant(Agent):
     def __init__(self) -> None:
+        # Language/voice the TTS is currently configured for. Shared with the
+        # transcript hook and the tts_node override.
+        self._lang_state: dict = {"lang": START_LANGUAGE, "stt": STT_START_LANGUAGE}
         end_call = EndCallTool()
         # Created per session so its pooled HTTP connection lives for the call.
         self.cal_tools = CalToolset()
@@ -295,6 +549,14 @@ class Assistant(Agent):
         super().__init__(
             instructions=f"""## Identity
 You are Mike, a warm, friendly dental clinic receptionist at {_company_name}, on a live phone call. Speak naturally — never robotic. Your job is to help patients with questions and book dental appointments.
+
+## Language
+- Mirror the caller. Urdu (or Hindi) in → Urdu reply. English in → English reply. Never mix: no English sentences for an Urdu question, no Urdu for an English one.
+- Urdu replies must be written in Urdu script (e.g. "جی بالکل، میں دیکھتا ہوں"), never Roman Urdu and never Devanagari.
+- Keep everyday dental words in English inside Urdu sentences — appointment, booking, filling, cleaning, root canal, X-ray, check-up — that is how patients say them.
+- Write dates and times as Urdu words, not digits ("کل صبح نو بجے", "پیر کو"). Say the clinic name as "عمر اشرف ڈینٹل کلینک".
+- Every English example phrase in these instructions is only an example: say it in the caller's language.
+- Stay in the caller's language for the rest of the call unless they switch first.
 
 ## Voice output rules
 - 1–2 short sentences per reply, under 25 words. One question at a time. Single continuous line, no newlines or lists.
@@ -350,9 +612,34 @@ Today's date: {_today}.""",
             tools=[*end_call.tools, self.cal_tools],
         )
 
+    def tts_node(self, text: AsyncIterable[str], model_settings: ModelSettings):
+        """Pick the TTS language from the reply text, before it is spoken.
+
+        The transcript hook handles the common case, but this is the guarantee:
+        whatever script the reply is actually written in decides the voice, so
+        Urdu text can never be read by the English voice (or the reverse).
+        """
+
+        async def _language_aware(stream: AsyncIterable[str]):
+            probe = ""
+            decided = False
+            async for chunk in stream:
+                if not decided:
+                    # Ignore expressive markup such as <expr label="neutral"/>.
+                    probe += re.sub(r"<[^>]*>", "", chunk)
+                    if _URDU_SCRIPT.search(probe):
+                        _set_tts_language(self.session, "ur", self._lang_state)
+                        decided = True
+                    elif re.search(r"[A-Za-z]{3,}", probe):
+                        _set_tts_language(self.session, "en", self._lang_state)
+                        decided = True
+                yield chunk
+
+        return Agent.default.tts_node(self, _language_aware(text), model_settings)
+
     async def on_enter(self) -> None:
         self.session.userdata = {}
-        _log_turn_timing(self.session)
+        _log_turn_timing(self.session, self._lang_state)
 
         def _llm_metrics_wrapper(metrics: LLMMetrics):
             asyncio.create_task(_display_llm_metrics(metrics))
@@ -369,7 +656,10 @@ Today's date: {_today}.""",
         self._prewarm_task = asyncio.create_task(self.cal_tools.prewarm())
 
         # Fixed greeting via TTS — no LLM round trip before the first word.
-        self.session.say(f"Hi, this is Mike from {_company_name} — how can I help?")
+        # Spoken in Urdu (the caller's likely language); the first English turn
+        # switches the voice back.
+        _set_tts_language(self.session, START_LANGUAGE, self._lang_state)
+        self.session.say(_greeting_text())
 
     async def on_exit(self) -> None:
         task = getattr(self, "_prewarm_task", None)
@@ -390,52 +680,24 @@ server = AgentServer(setup_fnc=_prewarm)
 
 @server.rtc_session(agent_name="MetaByte Solutions Receptionist")
 async def my_agent(ctx: agents.JobContext):
-    if _IS_CARTESIA:
-        tts_instance = LowLatencyTTS(
-            TTS_MODEL,
-            voice=TTS_VOICE_EN,
-            language="en",
-            extra_kwargs={"speed": TTS_SPEED},
-        )
-    else:
-        # Inworld/other inference voices: no Cartesia expressive markup. Keep a
-        # calm, professional pace (1.0 = normal speed).
-        tts_kwargs = {}
-        if TTS_MODEL.lower().startswith("inworld"):
-            tts_kwargs["extra_kwargs"] = {"speaking_rate": TTS_SPEED}
-        tts_instance = inference.TTS(
-            TTS_MODEL,
-            voice=TTS_VOICE_EN,
-            language="en",
-            **tts_kwargs,
-        )
+    tts_instance = _build_tts()
+    stt_instance = _build_stt()
+    llm_instance = _build_llm()
 
     def _tts_metrics_wrapper(metrics: TTSMetrics):
         asyncio.create_task(_display_tts_metrics(metrics))
 
-    tts_instance.on("metrics_collected", _tts_metrics_wrapper)
-
-    stt_kwargs = {
-        "model": STT_MODEL,
-        "language": "en",
-    }
-    if STT_MODEL.lower().startswith("deepgram"):
-        stt_kwargs["extra_kwargs"] = {
-            "no_delay": True,
-            "interim_results": True,
-            "smart_format": True,
-            "endpointing": 25,
-        }
+    # The router owns the engines, so the metrics hook goes on each child.
+    for engine in (
+        (tts_instance._english, tts_instance._urdu)
+        if isinstance(tts_instance, BilingualTTS)
+        else (tts_instance,)
+    ):
+        engine.on("metrics_collected", _tts_metrics_wrapper)
 
     session_kwargs = {
-        "stt": inference.STT(**stt_kwargs),
-        "llm": inference.LLM(
-            model=LLM_MODEL,
-            inference_class="priority",
-            extra_kwargs={
-                "max_completion_tokens": LLM_MAX_TOKENS,
-            },
-        ),
+        "stt": stt_instance,
+        "llm": llm_instance,
         "tts": tts_instance,
         "vad": ctx.proc.userdata["vad"],
         "turn_handling": TurnHandlingOptions(
@@ -458,17 +720,13 @@ async def my_agent(ctx: agents.JobContext):
             },
         ),
     }
-    # Keyterm biasing and expressive markup are provider-specific; only send them
-    # to the providers that understand them.
-    if STT_MODEL.lower().startswith("deepgram"):
-        session_kwargs["stt_context_options"] = {"keyterms": _stt_keyterms()}
-    if _IS_CARTESIA:
+    # Expressive markup is Cartesia-only.
+    if _IS_CARTESIA and not _USE_DEEPGRAM:
         session_kwargs["expressive"] = _EXPRESSIVE_OPTIONS
 
     session = AgentSession(**session_kwargs)
 
-    # Warm the inference TTS WebSocket pool so the greeting isn't delayed by
-    # a cold connect.
+    # Warm the TTS connections so the greeting isn't delayed by a cold connect.
     tts_instance.prewarm()
 
     # Noise cancellation for phone audio used to silently gate narrowband PSTN

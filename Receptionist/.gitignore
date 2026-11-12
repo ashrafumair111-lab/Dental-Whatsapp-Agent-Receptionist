@@ -1,3 +1,7 @@
 .env*.local
 .env.production
 superpowers/
+
+# generated audio samples (local audition only)
+tools/voice_samples/
+__pycache__/
