@@ -5,25 +5,24 @@ Two tools, deliberately:
 - ``check_availability(date)`` — what slots are free on a date.
 - ``create_booking(start_time, attendee_name, ...)`` — the only way to book.
 
-Email and phone are *not* parameters the model guesses. The booking runs
-LiveKit Agent Tasks against the live call, asking the caller for the address
-and the number, and reading the address back letter by letter before it is
-used — so the model never carries or mishears them.
+Email and phone are *not* parameters the model guesses. The booking asks for
+the address and the number itself — one question, one confirmation — and never
+rejects a format, so neither the model nor the caller gets stuck.
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
 import httpx
-from livekit.agents import RunContext, llm
-from livekit.agents.beta.workflows import GetEmailTask, GetPhoneNumberTask
-from livekit.agents.llm.tool_context import ToolError
+from livekit.agents import RunContext, AgentTask, llm
+from livekit.agents.llm.tool_context import ToolError, ToolFlag, function_tool
 
 CAL_API_BASE = "https://api.cal.com/v2"
 CAL_API_VERSION = "2026-02-25"
@@ -74,6 +73,135 @@ def _format_time(iso_str: str) -> str:
     except ValueError:
         return iso_str
     return dt.astimezone(_tz(DEFAULT_TZ)).strftime("%I:%M %p").lstrip("0")
+
+
+# --------------------------------------------------------------------------- #
+# Loose contact-info capture                                                    #
+# --------------------------------------------------------------------------- #
+_EMAIL_LOOSE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._%+\-]*@(?:[A-Za-z0-9](?:[A-Za-z0-9\-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$")
+
+
+def _normalize_email_loose(value: str) -> str | None:
+    """Best effort: take whatever the model hands over. Never rejects."""
+    text = (value or "").strip().lower()
+    if not text:
+        return None
+    typed = re.search(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+", text)
+    if typed:
+        return typed.group(0).rstrip(".,;")
+    if "@" in text:
+        text = text.replace(" at ", "@").replace(" dot ", ".")
+        text = re.sub(r"\s+", "", text)
+        if _EMAIL_LOOSE.match(text):
+            return text
+        return None
+    return None
+
+
+def _normalize_phone_loose(value: str) -> str | None:
+    """Keep the number's digits; leading + wins over everything. Never rejects."""
+    text = value or ""
+    digits = re.sub(r"\D", "", text)
+    if len(digits) < 7:
+        return None
+    if text.strip().startswith("+"):
+        return "+" + digits
+    return digits
+
+
+class LooseCaptureTask(AgentTask[str]):
+    """Ask for one piece of contact info and confirm it once.
+
+    Accepts literally anything reasonable — no country code demanded, no format
+    rejected — then reads it back and asks "is that correct?" exactly once. If
+    the caller says no, it only asks again for that one piece.
+    """
+
+    _KINDS = {
+        "email": {
+            "title": "email address",
+            "ask": (
+                "Ask the caller for the email to send the confirmation to. If they already "
+                "gave one earlier in this call, call update_capture with it — do not ask again."
+            ),
+            "readback": (
+                "Read the address back, slowly, saying it in plain words, then ask 'Is that correct?'"
+            ),
+        },
+        "phone": {
+            "title": "phone number",
+            "ask": (
+                "Ask the caller for their phone number, however they say it — with or without a "
+                "country code, any format. If they already gave it earlier in this call, call "
+                "update_capture with it — do not ask again. Never ask for a country code."
+            ),
+            "readback": (
+                "Read the number back digit by digit in small groups. Then ask 'Is that correct?'"
+            ),
+        },
+    }
+
+    def __init__(self, kind: str, *, chat_ctx) -> None:
+        spec = self._KINDS[kind]
+        self._kind = kind
+        self._spec = spec
+        self._current = ""
+        super().__init__(
+            instructions=(
+                f"You are a single step in a phone system whose only job is capturing the caller's {spec['title']}.\n"
+                f"{spec['ask']}\n"
+                "Call `update_capture` as soon as the caller gives a value. Never reject formats, "
+                "never say the number/address is wrong — take whatever they say.\n"
+                f"{spec['readback']}\n"
+                "Call `confirm` after the caller confirms. If the caller says no, call `update_capture` "
+                "with the corrected value and read it back again.\n"
+                "Keep replies to 1-2 short sentences. No lists, no extra questions."
+            ),
+            chat_ctx=chat_ctx,
+            tools=[self._build_update_tool(), self._build_confirm_tool(), self._build_decline_tool()],
+        )
+
+    async def on_enter(self) -> None:
+        self.session.generate_reply(instructions="Ask now, briefly.")
+
+    def _normalize(self, value: str) -> str | None:
+        return _normalize_email_loose(value) if self._kind == "email" else _normalize_phone_loose(value)
+
+    def _build_update_tool(self):
+        kind = self._kind
+
+        @function_tool(flags=ToolFlag.NONE)
+        async def update_capture(value: str) -> str | None:
+            """Store what the caller just said (email address or phone number).
+
+            Args:
+                value: exactly what the caller said, letters and symbols as they spoke them
+            """
+            normalized = self._normalize(value)
+            if normalized is None:
+                return f"That doesn't look like a {kind}. Ask the caller to say it once more, slowly — no country code needed, any format is fine."
+            self._current = normalized
+            return f"Captured {normalized}. {self._spec['readback']}"
+
+        return update_capture
+
+    def _build_confirm_tool(self):
+        @function_tool(flags=ToolFlag.NONE)
+        async def confirm() -> str | None:
+            """Call only after the caller says yes / correct / sahi hai / bilkul."""
+            self.complete(getattr(self, "_current", ""))
+            return None
+
+        return confirm
+
+    def _build_decline_tool(self):
+        @function_tool(flags=ToolFlag.NONE)
+        async def decline_capture(reason: str) -> None:
+            """Call when the caller refuses to give the email or phone number."""
+            if not self.done():
+                self.complete("")
+
+        return decline_capture
 
 
 # --------------------------------------------------------------------------- #
@@ -231,22 +359,17 @@ class CalToolset(llm.Toolset):
             raise ToolError("That time has already passed. Ask the caller for a later day or time.")
         start_iso = start_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Ask the caller for email and phone, one at a time, and confirm.
+        # Ask the caller for email and phone, one at a time, and confirm once.
         chat_ctx = ctx.session.current_agent.chat_ctx
         try:
             async with ctx.foreground():
-                email_result = await GetEmailTask(
-                    chat_ctx=chat_ctx,
-                    require_confirmation=True,
-                    extra_instructions="Ask for the email to send the booking confirmation to.",
-                )
-                phone_result = await GetPhoneNumberTask(
-                    chat_ctx=chat_ctx,
-                    require_confirmation=True,
-                    extra_instructions="Ask for a phone number where the clinic can reach the caller about this visit.",
-                )
+                email_result = await LooseCaptureTask("email", chat_ctx=chat_ctx)
+                phone_result = await LooseCaptureTask("phone", chat_ctx=chat_ctx)
         except ToolError:
             return "The caller did not give an email address. Ask them if they would like the clinic to call them instead."
+
+        email_address = email_result if isinstance(email_result, str) else ""
+        phone_number = phone_result if isinstance(phone_result, str) else ""
 
         body = {
             "eventTypeSlug": APPOINTMENT_SLUG,
@@ -254,11 +377,12 @@ class CalToolset(llm.Toolset):
             "start": start_iso,
             "attendee": {
                 "name": (attendee_name or "Patient").strip(),
-                "email": email_result.email_address,
+                "email": email_address or f"noemail+{self._username}@example.com",
                 "timeZone": DEFAULT_TZ,
-                "phoneNumber": phone_result.phone_number,
             },
         }
+        if phone_number:
+            body["attendee"]["phoneNumber"] = phone_number
         if notes:
             body["bookingFieldsResponses"] = {"notes": notes}
         data = await self._post("/bookings", body=body)
@@ -270,8 +394,8 @@ class CalToolset(llm.Toolset):
             f"Booking UID: {uid}\n"
             f"Start: {start_iso}\n"
             f"Attendee: {attendee_name}\n"
-            f"Confirmation sent to {email_result.email_address}\n"
-            f"Contact number: {phone_result.phone_number}"
+            f"Confirmation sent to {email_address or 'the clinic'}\n"
+            f"Contact number: {phone_number or 'n/a'}"
         )
 
 

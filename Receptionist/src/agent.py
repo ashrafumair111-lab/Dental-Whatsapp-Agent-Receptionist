@@ -1,13 +1,12 @@
-"""Mike — the dental clinic receptionist.
+"""Mike — the dental clinic receptionist (English).
 
-On purpose this is a small file:
+Small on purpose:
 
-- STT: Deepgram nova-3 multilingual, the whole call in one model.
-- TTS: one engine per language, picked per reply by the script of the text:
-  Urdu -> Edge TTS (ur-PK-AsadNeural, native voice), anything else -> Deepgram Aura.
-- The agent asks exactly one question per reply, never invents a booking, and
-  the only two tools are check_availability and create_booking. create_booking
-  collects and confirms email + phone itself.
+- STT: Deepgram nova-3 (English).
+- TTS: Deepgram Aura. One voice, English.
+- One question per reply; 1-2 short sentences.
+- The only two tools are check_availability and create_booking; the booking
+  collects and confirms the caller's email and phone itself.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -28,7 +26,6 @@ from livekit.agents import (
     JobProcess,
     TurnHandlingOptions,
     llm as llm_mod,
-    tts as tts_mod,
     room_io,
 )
 from livekit.agents.beta.tools import EndCallTool
@@ -36,7 +33,6 @@ from livekit.agents.metrics import LLMMetrics, STTMetrics, TTSMetrics
 from livekit.plugins import ai_coustics, deepgram, openai, silero
 
 from cal_tools import CalToolset, now_local
-from edge_tts_plugin import EdgeTTS
 
 logger = logging.getLogger("clinic")
 logger.setLevel(logging.INFO)
@@ -49,7 +45,6 @@ _company_address = os.environ.get("COMPANY_ADDRESS", "")
 _company_phone = os.environ.get("COMPANY_PHONE", "")
 _company_email = os.environ.get("COMPANY_EMAIL", "")
 
-# Services, one per line in COMPANY_SERVICES (";"-separated).
 _company_services_raw = os.environ.get("COMPANY_SERVICES", "")
 _company_services = [s.strip() for s in _company_services_raw.split(";") if s.strip()]
 _company_services_block = (
@@ -61,28 +56,8 @@ _company_services_block = (
 ENDPOINTING_MAX_DELAY = float(os.environ.get("ENDPOINTING_MAX_DELAY", "2.5"))
 STT_MODEL = os.environ.get("STT_MODEL", "nova-3").split("/")[-1] or "nova-3"
 TTS_EN_MODEL = os.environ.get("TTS_EN_MODEL", "aura-2-arcas-en")
-TTS_UR_VOICE = os.environ.get("TTS_UR_VOICE", "ur-PK-AsadNeural")
-TTS_UR_SPEED = float(os.environ.get("TTS_UR_SPEED", "1.15") or "1.15")
-
-_URDU_SCRIPT = re.compile(r"[؀-ۿ\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
-
-# A few Roman Urdu words so a Latin-script Urdu reply still picks the Urdu voice.
-_ROMAN_URDU_HINTS = {
-    "hai", "hain", "hoon", "hun", "haan", "ji", "aap", "ap", "apko", "aapko", "mera", "meri",
-    "mein", "main", "ka", "ki", "ke", "kya", "kitne", "kitna", "kisne", "kab", "kahan",
-    "kal", "aaj", "thik", "theek", "nam", "naam", "bata", "batain", "batayein", "karna",
-    "karni", "karo", "booking", "milne", "shukriya", "shukria", "hoga", "hogi",
-}
-
-
-def _looks_urdu(text: str) -> bool:
-    if _URDU_SCRIPT.search(text or ""):
-        return True
-    words = re.findall(r"[a-z']+", (text or "").lower())
-    return sum(w in _ROMAN_URDU_HINTS for w in words) >= 2
 
 _EN_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-_UR_DAYS = ["پیر", "منگل", "بدھ", "جمعرات", "جمعہ", "ہفتہ", "اتوار"]
 
 
 def _week_ahead() -> str:
@@ -91,13 +66,10 @@ def _week_ahead() -> str:
     for i in range(8):
         d = today + timedelta(days=i)
         tag = " (today)" if i == 0 else " (tomorrow)" if i == 1 else ""
-        rows.append(f"{_EN_DAYS[d.weekday()]}/{_UR_DAYS[d.weekday()]} = {d.strftime('%Y-%m-%d')}{tag}")
+        rows.append(f"{_EN_DAYS[d.weekday()]} = {d.strftime('%Y-%m-%d')}{tag}")
     return "; ".join(rows)
 
 
-# --------------------------------------------------------------------------- #
-# Metrics                                                                      #
-# --------------------------------------------------------------------------- #
 async def _display_llm_metrics(metrics: LLMMetrics) -> None:
     logger.info(
         "LLM | TTFT=%.2fs | %d in / %d out | tok/s=%.1f",
@@ -116,59 +88,12 @@ async def _display_tts_metrics(metrics: TTSMetrics) -> None:
     logger.info("TTS | TTFB=%.2fs | chars=%d", getattr(metrics, "ttfb", 0.0) or 0.0, metrics.characters_count)
 
 
-# --------------------------------------------------------------------------- #
-# Text -> voice routing                                                        #
-# --------------------------------------------------------------------------- #
-class MixedTTS(tts_mod.TTS):
-    """Urdu script -> Edge (ur-PK-AsadNeural), anything else -> Deepgram Aura."""
-
-    def __init__(self, english: tts_mod.TTS, urdu: tts_mod.TTS) -> None:
-        super().__init__(
-            capabilities=tts_mod.TTSCapabilities(streaming=False),
-            sample_rate=english.sample_rate,
-            num_channels=1,
-        )
-        self._english = english
-        self._urdu = urdu
-
-    @property
-    def model(self) -> str:
-        return "aura + edge"
-
-    @property
-    def provider(self) -> str:
-        return "deepgram + microsoft-edge"
-
-    def _active(self, text: str) -> tts_mod.TTS:
-        return self._urdu if _looks_urdu(text) else self._english
-
-    def synthesize(
-        self,
-        text: str,
-        *,
-        conn_options=None,
-    ) -> tts_mod.ChunkedStream:
-        kwargs = {} if conn_options is None else {"conn_options": conn_options}
-        return self._active(text).synthesize(text, **kwargs)
-
-    def prewarm(self) -> None:
-        self._english.prewarm()
-        if hasattr(self._urdu, "prewarm"):
-            self._urdu.prewarm()
-
-    async def aclose(self) -> None:
-        await self._english.aclose()
-        await self._urdu.aclose()
-
-
-def _build_tts() -> MixedTTS:
-    english = deepgram.TTS(model=TTS_EN_MODEL)
-    urdu = EdgeTTS(voice=TTS_UR_VOICE, rate=TTS_UR_SPEED)
-    return MixedTTS(english, urdu)
-
-
 def _build_stt():
-    return deepgram.STT(model=STT_MODEL, language="multi")
+    return deepgram.STT(model=STT_MODEL, language="en")
+
+
+def _build_tts():
+    return deepgram.TTS(model=TTS_EN_MODEL)
 
 
 def _build_llm():
@@ -186,9 +111,6 @@ def _build_llm():
     return llm_mod.FallbackAdapter([make(primary), make(fallback)], attempt_timeout=8.0)
 
 
-# --------------------------------------------------------------------------- #
-# One question per reply                                                       #
-# --------------------------------------------------------------------------- #
 def _cut_after_question(text: str) -> tuple[str, bool]:
     cut = min((i for i in (text.find("?"), text.find("؟")) if i >= 0), default=-1)
     return (text[: cut + 1], True) if cut >= 0 else (text, False)
@@ -253,7 +175,7 @@ async def _without_reasoning_envelopes(stream):
         yield item
 
 
-GREETING = "السلام علیکم! یہ عمر اشرف ڈینٹل کلینک ہے، میں مائیک ہوں۔ بتائیے، کیا مدد کر سکتا ہوں؟"
+GREETING = f"Hi, this is Mike from {_company_name}. How may I help you today?"
 
 
 class Assistant(Agent):
@@ -264,13 +186,12 @@ class Assistant(Agent):
         super().__init__(
             instructions=f"""You are Mike, a warm, friendly receptionist at {_company_name}, on a live phone call. Keep it short and human.
 
-- Reply in the language the caller uses (Urdu in, Urdu reply; English in, English reply). Common dental words can stay in English inside Urdu sentences (appointment, booking, root canal, X-ray, check-up).
-- One question at a time; 1–2 short sentences. Never list steps or say "waiting", "saved" or "checking".
+- Reply in English only. One question at a time; 1-2 short sentences. Never list steps or say "waiting", "saved" or "checking".
 
 BOOKING:
-- First find the day and the time they want. Convert "Tuesday" and "kal"/"parso" using this table (Asia/Karachi is UTC+5, no DST): {_week_ahead()}
+- First find the day and the time they want. Convert "tomorrow" and weekday names using this table (Asia/Karachi is UTC+5): {_week_ahead()}
 - Then ask their name.
-- Then call create_booking(start_time=..., attendee_name=...) and say nothing else in that turn. `start_time` is clinic-local as 'YYYY-MM-DD HH:MM' ("2026-11-20 15:30" = 3:30 PM). create_booking asks for and confirms the caller's email and phone itself — never ask for them yourself, never invent them.
+- Then call create_booking(start_time=..., attendee_name=...) and say nothing else in that turn. `start_time` is clinic-local as 'YYYY-MM-DD HH:MM' ("2026-11-20 15:30" = 3:30 PM). create_booking asks for and confirms the caller's email and their phone itself — never ask for them yourself, never invent them.
 - A dental visit is 30 minutes with the doctor.
 - Only say "booked" after create_booking confirms.
 
@@ -333,10 +254,6 @@ server = AgentServer(setup_fnc=_prewarm)
 
 @server.rtc_session(agent_name="MetaByte Solutions Receptionist")
 async def my_agent(ctx: agents.JobContext):
-    tts_instance = _build_tts()
-    stt_instance = _build_stt()
-    llm_instance = _build_llm()
-
     audio_input = room_io.AudioInputOptions()
     if os.environ.get("NOISE_CANCELLATION", "on").lower() not in {"off", "none", "false"}:
         audio_input.noise_cancellation = ai_coustics.audio_enhancement(
@@ -344,9 +261,9 @@ async def my_agent(ctx: agents.JobContext):
         )
 
     session = AgentSession(
-        stt=stt_instance,
-        llm=llm_instance,
-        tts=tts_instance,
+        stt=_build_stt(),
+        llm=_build_llm(),
+        tts=_build_tts(),
         vad=ctx.proc.userdata["vad"],
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
