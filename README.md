@@ -166,9 +166,9 @@ lk agent deploy --secrets-file .env.production --ignore-empty-secrets
 Mike sounds human, not scripted:
 
 - **Language follows the caller** — Urdu turn in → Urdu reply (Cartesia `sonic-3.6`, native Urdu delivery), English turn in → English reply; mixed dental terms (appointment, root canal, X-ray…) stay in English inside Urdu sentences; per-reply text routing keeps it clean
-- **Email verified by spelling** — the caller's address is captured by a `save_email` tool the first time it is heard and read back letter by letter; `create_booking` reuses that stored address, so the model can never re-ask for it or quietly "fix" the spelling
-- **Warm, terse flow** — 1–2 sentences per reply, one question at a time, direct answers, no filler
-- **Tool fillers** — Cal.com calls run inside `ctx.with_filler()` with an immediate status update, so the agent never goes silent mid-booking
+- **Email captured by code, not the model** — the address is parsed out of the caller's own words (letter-by-letter, "at"/"dot", any wrapping chatter) and the agent answers with one fixed read-back line; `create_booking` reuses it, and the model has no email tool at all, so it can never re-ask or quietly "fix" the spelling
+- **Warm, terse flow** — 1–2 sentences per reply, one question at a time, direct answers, no filler; the TTS stream is cut at the first question mark so no turn can turn into a script
+- **Silent tools** — Cal.com calls run without spoken filler; the agent says its own short line and the tool stays in the background
 - **Safety-first speech** — hidden reasoning/envelope text from the LLM is stripped before TTS (verified by unit tests)
 - **Urdu-first greeting** — "السلام علیکم! یہ عمر اشرف ڈینٹل کلینک ہے، میں مائیک ہوں۔"
 
@@ -177,8 +177,7 @@ Mike sounds human, not scripted:
 | Tool | Purpose |
 |------|---------|
 | `check_availability(date)` | Slots for a date (YYYY-MM-DD), with caching |
-| `save_email(spoken)` | Normalises a spelled-out address (`"s m i t h at gmail dot com"` → `smith@gmail.com`) and stores it for the booking |
-| `create_booking(start_time, attendee_name, attendee_phone, ...)` | Book an appointment (uses the email saved by `save_email`) |
+| `create_booking(start_time, attendee_name, attendee_phone, ...)` | Book an appointment (uses the email captured from the caller's speech) |
 | `reschedule_booking(uid, new_start)` | Reschedule by booking UID |
 | `cancel_booking(uid)` | Cancel by booking UID |
 

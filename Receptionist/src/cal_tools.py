@@ -159,6 +159,83 @@ def _spell_back(email: str) -> str:
     return f"{_letters(local)} at {domain_spoken}"
 
 
+# Words a caller wraps around the address. They end the address, they are not
+# part of it: "meri email ali at gmail dot com hai" -> "ali@gmail.com".
+_EMAIL_STOP = {
+    "hai", "haan", "han", "hn", "ha", "ji", "jee", "please", "plz", "bata",
+    "batao", "bataye", "batayein", "batado", "batadein", "bol", "bolo", "raha",
+    "rahi", "hun", "hoon", "hain", "mera", "meri", "wala", "wali", "kar",
+    "karna", "karni", "dena", "de", "do", "dijiye", "sir", "maam", "madam",
+    "sahab", "sahib", "aap", "ap", "ka", "ki", "ke", "ye", "yeh", "yah",
+    "this", "that", "is", "are", "was", "for", "appointment", "booking",
+    "thank", "thanks", "shukriya", "shukria", "ok", "okay", "theek", "thik",
+    "aur", "and", "phone", "number", "email", "mail", "id", "my", "meri",
+}
+
+# Leading words to skip before the address starts.
+_EMAIL_LEAD = {"hai", "haan", "han", "hn", "is", "the", "meri", "mera", "my", "ye", "yeh", "that", "this", "please", "ji", "wo", "woh"}
+
+# Cut whatever the caller said after the domain, e.g. "...gmail dot com hai".
+# Longest suffixes first so "co.uk" wins over "co".
+_TLDS = (
+    "co.uk", "com.pk", "com.au", "co.in", "co.jp", "co.za", "com.sa", "com.bd",
+    "com", "net", "org", "edu", "gov", "mil", "int", "info", "biz", "name",
+    "pro", "io", "co", "me", "tv", "xyz", "online", "site", "store", "live",
+    "app", "dev", "cloud", "pk", "uk", "us", "ca", "au", "de", "fr", "ae",
+    "sa", "in", "bd", "my", "sg", "it", "es", "nl", "ch", "se", "no", "ru",
+)
+_TLD_CUT = re.compile(r"^(.*?\.(?:" + "|".join(re.escape(t) for t in _TLDS) + r"))")
+
+_TYPED_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+")
+_EMAIL_HINT = re.compile(r"@|\b(?:at|dot|point|period|email|e-mail|mail)\b", re.IGNORECASE)
+
+
+def email_from_speech(text: str) -> str | None:
+    """Pull a real email address out of one caller transcript, else ``None``.
+
+    The caller can say it however they like — letter by letter, "at" and "dot",
+    wrapped in "meri email hai ... shukriya" — whatever letters are said become
+    the address. Keeping this in code means the model never holds the email, so
+    it can never re-ask for it or mangle it.
+    """
+    raw = (text or "").strip()
+    if not raw or not _EMAIL_HINT.search(raw):
+        return None
+
+    typed = _TYPED_EMAIL.search(raw)
+    if typed:
+        candidate = typed.group(0).rstrip(".,;:")
+    else:
+        lowered = raw.lower().replace("at the rate", "at")
+        tokens = re.sub(r"[^a-z0-9@._+\- ]", " ", lowered).split()
+        # Start after the last "email"/"mail"/"id" marker, if one was said.
+        for i, tok in enumerate(tokens):
+            if tok in {"email", "mail", "id"}:
+                tokens = tokens[i + 1 :]
+                break
+        while tokens and tokens[0] in _EMAIL_LEAD:
+            tokens.pop(0)
+        picked: list[str] = []
+        for tok in tokens:
+            if tok in _EMAIL_STOP and picked:
+                break
+            picked.append(tok)
+            if len(picked) >= 24:
+                break
+        candidate = " ".join(picked)
+
+    candidate = _normalize_spoken_email(candidate)
+    if "@" not in candidate:
+        return None
+
+    local, _, domain = candidate.partition("@")
+    cut = _TLD_CUT.match(domain)
+    if cut:
+        candidate = f"{local}@{cut.group(1)}"
+
+    return candidate if EMAIL_REGEX.match(candidate) else None
+
+
 def _normalize_phone(raw: str) -> str:
     """Accept a phone number in any format and return E.164 when possible.
 
@@ -222,8 +299,8 @@ class CalToolset(llm.Toolset):
         if not username:
             raise RuntimeError("CAL_USERNAME not set in environment")
         self._username = username
-        # Email captured once by save_email, so the model never has to hold the
-        # spelled-out address in its own context (that was the re-ask loop).
+        # Email captured once from the caller's own words, so the model never
+        # has to hold the spelled-out address (that was the re-ask loop).
         self._email: str | None = None
         # One pooled client per call: keeps TLS connections warm between tools.
         self._client = httpx.AsyncClient(
@@ -234,6 +311,14 @@ class CalToolset(llm.Toolset):
                 keepalive_expiry=120,
             ),
         )
+
+    def set_email(self, email: str | None) -> None:
+        """Store the address captured from the caller's speech."""
+        self._email = email or None
+
+    @property
+    def email(self) -> str | None:
+        return self._email
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -353,28 +438,6 @@ class CalToolset(llm.Toolset):
         return f"Available times on {date}: {listing}."
 
     @llm.function_tool
-    async def save_email(
-        self,
-        ctx: RunContext,
-        spoken: Annotated[
-            str,
-            "The email exactly as the caller said it, including letter-by-letter "
-            "spelling, 'at' and 'dot' — never cleaned up or corrected",
-        ],
-    ) -> str:
-        """Save the caller's email once and return the exact line to read back.
-
-        Call this the FIRST time the email is heard. It stores the address, so
-        create_booking does not need it again and the caller is never asked to
-        spell the same address twice.
-        """
-        email = _validate_email(spoken)
-        self._email = email
-        return (
-            f"Email: {email}. Read back as: \"{_spell_back(email)}\"."
-        )
-
-    @llm.function_tool
     async def create_booking(
         self,
         ctx: RunContext,
@@ -383,15 +446,13 @@ class CalToolset(llm.Toolset):
         attendee_phone: Annotated[str, "Caller's phone number exactly as they said it; any format is fine"],
         attendee_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] = "Asia/Karachi",
     ) -> str:
-        """Book a dental appointment. Uses the email already captured by save_email.
+        """Book a dental appointment using the email already captured from speech.
 
-        Call this once name, phone, slot and email are confirmed. Never ask the
-        caller to repeat the email here — save_email already stored it.
+        Call this once name, phone, slot and email are confirmed. The email is
+        owned by the code, not the model: it was captured from the caller's own
+        words and is reused here, so it is never asked for twice.
         """
-        raw_email = self._email or ""
-        if not raw_email:
-            self._email = raw_email = "patient@gmail.com"
-        resolved_email = _validate_email(raw_email)
+        resolved_email = _validate_email(self._email or "patient@gmail.com")
         resolved_phone = _normalize_phone(attendee_phone)
 
         body = {

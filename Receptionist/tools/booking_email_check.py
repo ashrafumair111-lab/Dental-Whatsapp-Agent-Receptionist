@@ -1,6 +1,6 @@
-"""Deterministic check: the email captured by save_email reaches the booking body.
+"""Deterministic check: the email captured from speech reaches the booking.
 
-Run:  .venv\\Scripts\\python.exe tools\\booking_email_check.py
+Run:  .venv\\Scripts\\python.exe tools/booking_email_check.py
 """
 
 from __future__ import annotations
@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from contextlib import asynccontextmanager
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -17,24 +16,12 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(".env.local")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from cal_tools import CalToolset  # noqa: E402
-
-
-class FakeCtx:
-    """Just enough of RunContext for the tools (ctx.with_filler)."""
-
-    def with_filler(self, *args, **kwargs):
-        @asynccontextmanager
-        async def _cm():
-            yield
-
-        return _cm()
+from cal_tools import CalToolset, email_from_speech  # noqa: E402
 
 
 async def main() -> None:
     toolset = CalToolset()
     tools = {t.info.name: t for t in toolset.tools}
-    ctx = FakeCtx()
     fails = 0
 
     sent: list[dict] = []
@@ -47,34 +34,30 @@ async def main() -> None:
 
     # 1. Booking never blocks on a missing email (that caused the re-ask loop).
     await tools["create_booking"](
-        ctx,
+        None,
         start_time="2026-11-14T09:00:00Z",
         attendee_name="Ali Khan",
         attendee_phone="0300 1234567",
     )
     if (sent[-1].get("attendee") or {}).get("email") == "patient@gmail.com":
-        print("OK   no saved email -> booked with placeholder, caller not re-asked")
+        print("OK   no captured email -> booked with placeholder, caller not re-asked")
     else:
         fails += 1
         print(f"FAIL: booking body {sent[-1].get('attendee')}")
 
-    # 2. save_email accepts a spelled-out address and stores it.
-    out = await tools["save_email"](ctx, spoken="s m i t h at gmail dot com")
+    # 2. The transcript is enough: code captures the address, no tool call.
+    email = email_from_speech("meri email s m i t h at gmail dot com hai")
+    toolset.set_email(email)
     stored = toolset._email
     if stored == "smith@gmail.com":
-        print(f"OK   save_email stored {stored}")
+        print(f"OK   transcript captured {stored}")
     else:
         fails += 1
-        print(f"FAIL: stored {stored!r}")
-    if "s m i t h at gmail dot com" in out:
-        print("OK   read-back line present")
-    else:
-        fails += 1
-        print(f"FAIL: read-back missing: {out[:120]}")
+        print(f"FAIL: captured {stored!r}")
 
     # 3. Booking now reuses that address without asking again.
     result = await tools["create_booking"](
-        ctx,
+        None,
         start_time="2026-11-14T09:00:00Z",
         attendee_name="Ali Khan",
         attendee_phone="0300 1234567",
@@ -86,10 +69,18 @@ async def main() -> None:
         fails += 1
         print(f"FAIL: booking body {attendee}")
     if "smith@gmail.com" in str(result):
-        print("OK   confirmation mentions the saved email")
+        print("OK   confirmation mentions the captured email")
     else:
         fails += 1
         print(f"FAIL: confirmation text: {result[:140]}")
+
+    # 4. A later turn that repeats the same address is not captured again.
+    again = email_from_speech("haan smith at gmail dot com sahi hai")
+    if again == stored:
+        print("OK   repeated address maps to the same value (no re-ask, no loop)")
+    else:
+        fails += 1
+        print(f"FAIL: repeated address parsed as {again!r}")
 
     await toolset.aclose()
     print("\nresult:", "PASS" if fails == 0 else f"{fails} FAILED")
