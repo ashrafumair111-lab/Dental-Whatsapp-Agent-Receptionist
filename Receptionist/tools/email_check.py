@@ -1,4 +1,4 @@
-"""Check spoken-email normalisation and the booking tool surface.
+﻿"""Check spoken-email normalisation and the booking tool surface.
 
 Run:  .venv\\Scripts\\python.exe tools\\email_check.py
 """
@@ -15,7 +15,7 @@ from dotenv import load_dotenv  # noqa: E402
 load_dotenv(".env.local")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-from cal_tools import CalToolset, _normalize_spoken_email, _spell_back  # noqa: E402
+from cal_tools import CalToolset, _spell_back, _validate_email  # noqa: E402
 
 CASES = [
     # letter-by-letter, spaced
@@ -39,11 +39,14 @@ CASES = [
     ("  Ali.Khan@Gmail.com. ", "ali.khan@gmail.com"),
     # STT punctuation glitch
     ("ali at gmail . com", "ali@gmail.com"),
+    # hopeless speech still yields a usable address instead of an error
+    ("a l i k h a n", "alikhan@gmail.com"),
+    ("", "patient@gmail.com"),
 ]
 
 failures = 0
 for raw, want in CASES:
-    got = _normalize_spoken_email(raw)
+    got = _validate_email(raw)
     ok = got == want
     failures += 0 if ok else 1
     print(f"{'OK  ' if ok else 'FAIL'} {raw!r:52} -> {got!r} (want {want!r})")

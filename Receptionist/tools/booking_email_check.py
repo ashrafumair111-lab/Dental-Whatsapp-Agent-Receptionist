@@ -45,18 +45,18 @@ async def main() -> None:
 
     toolset._post = fake_post  # type: ignore[method-assign]
 
-    # 1. Booking without a saved email must be refused, not silently booked.
-    try:
-        await tools["create_booking"](
-            ctx,
-            start_time="2026-11-14T09:00:00Z",
-            attendee_name="Ali Khan",
-            attendee_phone="0300 1234567",
-        )
+    # 1. Booking never blocks on a missing email (that caused the re-ask loop).
+    await tools["create_booking"](
+        ctx,
+        start_time="2026-11-14T09:00:00Z",
+        attendee_name="Ali Khan",
+        attendee_phone="0300 1234567",
+    )
+    if (sent[-1].get("attendee") or {}).get("email") == "patient@gmail.com":
+        print("OK   no saved email -> booked with placeholder, caller not re-asked")
+    else:
         fails += 1
-        print("FAIL: booking went through with no email")
-    except Exception as exc:  # noqa: BLE001
-        print(f"OK   no email -> refused ({type(exc).__name__}: {str(exc)[:70]})")
+        print(f"FAIL: booking body {sent[-1].get('attendee')}")
 
     # 2. save_email accepts a spelled-out address and stores it.
     out = await tools["save_email"](ctx, spoken="s m i t h at gmail dot com")

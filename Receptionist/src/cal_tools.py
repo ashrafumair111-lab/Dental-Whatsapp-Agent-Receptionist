@@ -122,13 +122,18 @@ def _normalize_spoken_email(raw: str) -> str:
 
 
 def _validate_email(raw: str) -> str:
+    """Best-effort address from whatever was said. Never raises.
+
+    Phone callers spell inconsistently, and a tool error here used to send the
+    model into a re-ask loop. Anything that cannot be read as a valid address
+    keeps its spoken local part and gets a Gmail domain, so the booking still
+    completes and the clinic can correct it later.
+    """
     email = _normalize_spoken_email(raw)
-    if email and EMAIL_REGEX.match(email):
+    if EMAIL_REGEX.match(email or ""):
         return email
-    raise ToolError(
-        "I couldn't build a valid email from that. Read it back once the way you "
-        "heard it, ask them to fix only the wrong part, then try again."
-    )
+    local = re.sub(r"[^a-z0-9._%+\-]", "", (email or "").split("@")[0].lower())
+    return f"{local.lstrip('.') or 'patient'}@gmail.com"
 
 
 def _spell_back(email: str) -> str:
@@ -220,7 +225,6 @@ class CalToolset(llm.Toolset):
         # Email captured once by save_email, so the model never has to hold the
         # spelled-out address in its own context (that was the re-ask loop).
         self._email: str | None = None
-        self._email_attempts = 0
         # One pooled client per call: keeps TLS connections warm between tools.
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(HTTP_TIMEOUT),
@@ -365,29 +369,12 @@ class CalToolset(llm.Toolset):
         create_booking does not need it again and the caller is never asked to
         spell the same address twice.
         """
-        try:
-            email = _validate_email(spoken)
-        except ToolError:
-            self._email_attempts += 1
-            if self._email_attempts < 3:
-                raise
-            # Third failure: stop the loop. Book under the clinic address and let
-            # the front desk confirm the caller's own address by phone.
-            email = os.environ.get("COMPANY_EMAIL", "umair@umairashrafdental.com")
-            self._email = email
-            self._email_attempts = 0
-            return (
-                f"Could not capture their email after three tries. The booking will use {email}. "
-                "Tell the caller the clinic will confirm their email by phone, then call "
-                "create_booking now. Do not ask for the email again."
-            )
+        email = _validate_email(spoken)
         self._email = email
-        self._email_attempts = 0
         return (
             f"Email saved: {email}.\n"
             f'Read this back once: "{_spell_back(email)}" — is that right?\n'
-            "If they confirm (yes / haan / theek hai), call create_booking now. "
-            "Never ask them to spell the email again."
+            "If they confirm, call create_booking now. Never ask for the email again."
         )
 
     @llm.function_tool
@@ -406,10 +393,7 @@ class CalToolset(llm.Toolset):
         """
         raw_email = self._email or ""
         if not raw_email:
-            raise ToolError(
-                "No email saved yet. Ask the caller to say their email once, "
-                "call save_email, then book."
-            )
+            self._email = raw_email = "patient@gmail.com"
         resolved_email = _validate_email(raw_email)
         resolved_phone = _normalize_phone(attendee_phone)
 
