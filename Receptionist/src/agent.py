@@ -756,6 +756,31 @@ def _turn_detection():
     return mode
 
 
+async def _first_question_only(stream: AsyncIterable[str]) -> AsyncIterable[str]:
+    """Speak at most one question, then drop the rest of the model stream.
+
+    Small models answer "I want to book on Tuesday" with the entire booking
+    script — day, time, email, phone, thanks, "I'm booking now". Cutting the
+    audio after the first question keeps every turn to a single question, no
+    matter what the model generated. The remaining chunks are still drained so
+    the LLM stream closes cleanly.
+    """
+    spoken = ""
+    finished = False
+    async for chunk in stream:
+        if finished:
+            continue
+        cut = min((i for i in (chunk.find("?"), chunk.find("؟")) if i >= 0), default=-1)
+        if cut >= 0:
+            yield chunk[: cut + 1]  # drop anything the model wrote after the "?"
+            finished = True
+            continue
+        yield chunk
+        spoken += chunk
+        if len(spoken) > 260:
+            finished = True
+
+
 class Assistant(Agent):
     def __init__(self) -> None:
         # Language/voice the TTS is currently configured for. Shared with the
@@ -794,15 +819,11 @@ class Assistant(Agent):
 {_language_block}
 - Keep replies to 1-2 short sentences. One question at a time. No lists.
 - Only speak the patient-facing answer. Never speak tool names, status lines, filler, or your own reasoning.
-- Booking order, one step at a time, wait for the answer before moving on:
-  1. Ask the day and the time together ("kis din aur kitne baje?"), then call check_availability for that date.
-  2. Ask for the email.
-  3. If they spell it, call save_email with exactly what they said. If they already gave a clear email, still call save_email once with it.
-  4. Read the saved email back in one sentence: "aap ki email s m i t h at gmail dot com hai, sahi hai?" and wait for yes.
-  5. Ask for their name and the phone number.
-  6. Say you are booking it now ("theek hai, main booking kar raha hoon"), then call create_booking.
-- Never ask for the same detail twice. If the caller already gave it, move to the next step.
-- Speak a confirmation only after create_booking succeeds.
+- ONE question per reply. At most two short sentences. Never list steps, never announce what you will do, never say "waiting", "saved", "processing" or any status.
+- Ask only what is still missing, in this order: day+time, then email, then phone+name. If the caller already gave something, never ask it again.
+- Example: caller says "Tuesday ki booking karni hai" -> your whole reply is "Kitne baje?" (nothing else).
+- After they give the email, call save_email, then say only: "aap ki email X hai, sahi hai?"
+- After phone and name, say only "theek hai, booking kar raha hoon" and call create_booking. Never speak again until the tool returns, then give one short confirmation.
 - Take phone numbers in one go, never ask for a country code; say them back in small groups.
 - Stay on dental clinic topics. If you don't know something, say so honestly.
 
@@ -825,7 +846,7 @@ Today's date: {_today}.""",
         async def _language_aware(stream: AsyncIterable[str]):
             probe = ""
             decided = False
-            async for chunk in stream:
+            async for chunk in _first_question_only(stream):
                 if not decided:
                     # Ignore expressive markup such as <expr label="neutral"/>.
                     probe += re.sub(r"<[^>]*>", "", chunk)

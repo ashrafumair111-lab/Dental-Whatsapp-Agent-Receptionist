@@ -371,10 +371,7 @@ class CalToolset(llm.Toolset):
         email = _validate_email(spoken)
         self._email = email
         return (
-            f"Email saved: {email}.\n"
-            f'Say this back once, in the caller\'s language: "Your email is {_spell_back(email)} — is that right?"\n'
-            "Then wait for their answer. If they confirm, move to the phone number. "
-            "Never ask for the email again."
+            f"Email: {email}. Read back as: \"{_spell_back(email)}\"."
         )
 
     @llm.function_tool
