@@ -1,9 +1,9 @@
-"""Mike — the dental clinic receptionist (English).
+"""Mike — the dental clinic receptionist (Urdu + English).
 
-Deliberately small and deterministic where it matters:
+Small and deterministic where it matters:
 
-- STT: Deepgram nova-3 (English) for the whole call.
-- TTS: Deepgram Aura (aura-2-arcas-en). One voice, everywhere.
+- STT: Deepgram nova-3 multilingual (English + Urdu) for the whole call.
+- TTS: ElevenLabs eleven_multilingual_v2 — Daniel's voice, native Urdu and English.
 - The LLM (Groq gpt-oss-120b) handles the greeting, clinic questions and the
   day/time. Every stage after the time is saved (name -> phone -> email ->
   booking) is spoken by code — one question, exactly once, never repeated.
@@ -32,7 +32,7 @@ from livekit.agents import (
 )
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.metrics import LLMMetrics, STTMetrics, TTSMetrics
-from livekit.plugins import ai_coustics, deepgram, openai, silero
+from livekit.plugins import ai_coustics, deepgram, elevenlabs, openai, silero
 
 from cal_tools import CalToolset, _spell_back, now_local, format_when
 
@@ -57,7 +57,8 @@ _company_services_block = (
 
 ENDPOINTING_MAX_DELAY = float(os.environ.get("ENDPOINTING_MAX_DELAY", "2.5"))
 STT_MODEL = os.environ.get("STT_MODEL", "nova-3").split("/")[-1] or "nova-3"
-TTS_EN_MODEL = os.environ.get("TTS_EN_MODEL", "aura-2-arcas-en")
+ELEVEN_VOICE_ID = os.environ.get("ELEVEN_VOICE_ID", "onwK4e9ZLuTAKqWW03F9")  # Daniel
+ELEVEN_MODEL = os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2")
 
 _EN_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -94,11 +95,11 @@ async def _display_tts_metrics(metrics: TTSMetrics) -> None:
 
 
 def _build_stt():
-    return deepgram.STT(model=STT_MODEL, language="en")
+    return deepgram.STT(model=STT_MODEL, language="multi")
 
 
 def _build_tts():
-    return deepgram.TTS(model=TTS_EN_MODEL)
+    return elevenlabs.TTS(voice_id=ELEVEN_VOICE_ID, model=ELEVEN_MODEL)
 
 
 def _build_llm():
@@ -234,23 +235,18 @@ class Assistant(Agent):
         self.flow = self.cal_tools.flow
         today = now_local().strftime("%A, %Y-%m-%d")
         super().__init__(
-            instructions=f"""You are Mike, a warm, friendly receptionist at {_company_name}, on a live phone call.
+            instructions=f"""You are Mike, the friendly receptionist at {_company_name}, on a live call. Keep replies warm, short (1–2 sentences) and in the same language the caller uses: Urdu in, Urdu out; English in, English out. Common dental words can stay in English. One question at a time.
 
-- English only. One question at a time; 1-2 short sentences. Never list steps or say "waiting", "saved" or "checking".
+BOOKING:
+- First find the day and the time. Convert "kal", "parso", "Tuesday" etc. using this table (Asia/Karachi is UTC+5): {_week_ahead()}
+- Then ask their name and call set_appointment_time and say nothing else in that turn. Times are clinic-local 'YYYY-MM-DD HH:MM' (3 baje = 15:00). A slot is only real if set_appointment_time says it is free.
+- If it says NOT_AVAILABLE, offer two of the free times in one short question.
+- Never ask for name, phone or email yourself — the system collects them right after the time is saved.
+- Only say "booked" after the system confirms. The dental visit is 30 minutes.
 
-BOOKING (the system handles everything except the day and the time):
-- You only need the DAY and the TIME. Ask for whichever is missing, one question at a time.
-- The moment BOTH are known, call set_appointment_time and say nothing else in that turn. Use clinic-local values: appointment_date as YYYY-MM-DD, appointment_time as 24-hour HH:MM. A bare hour from 1 to 8 means PM (3 baje = 15:00); 9 to 11 means AM.
-- Never ask for the name, phone or email yourself. The system asks for them automatically right after the time is saved. If the caller asks a side question there, answer it in one short sentence, then ask only what the BOOKING STATE note says comes next.
-- If set_appointment_time says NOT_AVAILABLE, offer two of the free times in one short question.
-- After the appointment is booked, if the caller has nothing else, say a short goodbye and call end_call.
-- Cancel or reschedule: ask for the booking UID and their name, say the clinic team will help, and let the caller know they can call us again.
+NOT_BOOKING: Stay on dental clinic topics. Answer prices/hours/services honestly; never invent. If something needs a human, say the clinic team will call back.
 
-- Stay on dental clinic topics. If you don't know something, say so honestly. Never invent services, prices or hours.
-Services: {_company_services_block}
-Company: {_company_legal} (trading as {_company_name}) — {_company_address}; Phone {_company_phone}; Email {_company_email}. Share only when asked.
-
-Dates (Asia/Karachi is UTC+5): {_week_ahead()}
+Company: {_company_legal} — {_company_address}; Phone {_company_phone}; Email {_company_email}. Services: {_company_services_block}
 Today: {today}.""",
             tools=[*end_call.tools, self.cal_tools],
         )
@@ -318,7 +314,7 @@ Today: {today}.""",
         self.session.tts.on("metrics_collected", _tts_wrapper)
 
         self._prewarm_task = asyncio.create_task(self.cal_tools.prewarm())
-        self.session.say(f"Hi, this is Mike from {_company_name}. How may I help you today?")
+        self.session.say(f"السلام علیکم! Hi, this is Mike from {_company_name}. How may I help you? بتائیے؟")
 
     async def on_exit(self) -> None:
         task = getattr(self, "_prewarm_task", None)

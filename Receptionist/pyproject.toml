@@ -3,7 +3,7 @@ name = "receptionist"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "livekit-agents[cartesia]>=1.8.11",
+    "livekit-agents[cartesia,elevenlabs]~=1.8",
     "livekit-plugins-silero>=0.10",
     "livekit-plugins-ai-coustics>=0.2",
     "livekit-plugins-deepgram>=1.8",
