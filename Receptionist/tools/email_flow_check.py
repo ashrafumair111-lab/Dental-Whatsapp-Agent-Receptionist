@@ -69,4 +69,36 @@ else:
     fails += 1
     print(f"FAIL: recent user text = {joined!r}")
 
+# The email question is capped at two: count the asks, and make sure the
+# move-on line does not itself count as an email question.
+asks = ChatContext()
+asks.add_message(role="assistant", content="Hi, how can I help?")
+asks.add_message(role="assistant", content="Aap ka email bata dein?")
+if agent._email_ask_count(asks) == 1:
+    print("OK   email ask counted (1)")
+else:
+    fails += 1
+    print(f"FAIL: ask count {agent._email_ask_count(asks)}")
+
+asks.add_message(role="assistant", content="Email address?")
+if agent._email_ask_count(asks) == 2:
+    print("OK   email ask counted (2 -> cap reached)")
+else:
+    fails += 1
+    print(f"FAIL: ask count {agent._email_ask_count(asks)}")
+
+for lang in ("en", "ur"):
+    line = agent._skip_email_line(lang)
+    if "email" in line.lower() or "ای میل" in line:
+        fails += 1
+        print(f"FAIL: move-on line still mentions email: {line!r}")
+    else:
+        print(f"OK   move-on line ({lang}) = {line!r}")
+asks.add_message(role="assistant", content=agent._skip_email_line("en"))
+if agent._email_ask_count(asks) == 2:
+    print("OK   move-on line is not counted as another ask")
+else:
+    fails += 1
+    print(f"FAIL: ask count after move-on {agent._email_ask_count(asks)}")
+
 print("\nresult:", "PASS" if fails == 0 else f"{fails} FAILED")

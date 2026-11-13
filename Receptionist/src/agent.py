@@ -54,7 +54,7 @@ def _env_number(name: str, default, cast=float):
 # sounded slow/robotic on WhatsApp calls. English keeps TTS_SPEED.
 TTS_UR_SPEED = _env_number("TTS_UR_SPEED", 1.25, float)
 TTS_SPEED = _env_number("TTS_SPEED", 1.0, float)
-ENDPOINTING_MAX_DELAY = _env_number("ENDPOINTING_MAX_DELAY", 0.7, float)
+ENDPOINTING_MAX_DELAY = _env_number("ENDPOINTING_MAX_DELAY", 2.5, float)
 LLM_MAX_TOKENS = _env_number("LLM_MAX_TOKENS", 120, int)
 STT_MODEL = os.environ.get("STT_MODEL", "deepgram/nova-3")
 # LLM: Groq (OpenAI-compatible) with the free OpenAI-compatible plugin. Groq's
@@ -780,6 +780,29 @@ def _recent_user_text(chat_ctx: llm_mod.ChatContext) -> str:
     return " ".join(reversed(texts))
 
 
+def _email_ask_count(chat_ctx: llm_mod.ChatContext) -> int:
+    """How many times the agent has already asked the caller for an email."""
+    count = 0
+    for item in chat_ctx.items:
+        if getattr(item, "role", None) != "assistant":
+            continue
+        try:
+            text = item.text_content or ""
+        except Exception:
+            continue
+        low = text.lower()
+        if ("email" in low or "mail" in low or "ای میل" in text) and ("?" in text or "؟" in text):
+            count += 1
+    return count
+
+
+def _skip_email_line(lang: str) -> str:
+    """Said instead of a third email question — moves the call forward."""
+    if lang == "en":
+        return "No problem, we can sort that out later. What's your name and phone number?"
+    return "ٹھیک ہے، یہ بعد میں دیکھ لیں گے۔ آپ کا نام اور فون نمبر بتا دیں؟"
+
+
 def _readback_line(email: str, lang: str) -> str:
     """The single sentence that confirms a captured email to the caller."""
     spelled = _spell_back(email)
@@ -852,7 +875,7 @@ class Assistant(Agent):
 - One question per reply, at most two short sentences. Never list steps, never announce what you will do or what the system is doing, and never say "waiting", "saved", "processing", "checking" or any status word.
 - Ask only what is still missing, in this order: day and time, then email, then name and phone. If the caller already gave something, never ask for it again.
 - Example: caller says "Tuesday ki booking karni hai" -> your whole reply is "Kitne baje?"
-- The email read-back is automatic. Ask for the email once if you do not have it, then say nothing more about it and move to name and phone.
+- The email read-back is automatic. Ask for the email at most twice, then say nothing more about it and move to name and phone.
 - Once you have name, phone, date and time, say "theek hai, booking kar raha hoon" and call create_booking. After it returns, give one short confirmation.
 - Take phone numbers in one go, never ask for a country code.
 - Stay on dental clinic topics. If you don't know something, say so honestly.
@@ -917,6 +940,12 @@ Today's date: {_today}.""",
             logger.info("EMAIL | captured %s", email)
             return _readback_line(email, self._lang_state.get("lang", START_LANGUAGE))
 
+        # Asked twice and still nothing usable: never ask a third time. Move the
+        # call on with a fixed line instead of letting the model loop.
+        if not self.cal_tools.email and _email_ask_count(chat_ctx) >= 2:
+            logger.info("EMAIL | already asked twice, moving on")
+            return _skip_email_line(self._lang_state.get("lang", START_LANGUAGE))
+
         stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
         return _without_reasoning_envelopes(stream)
 
@@ -951,10 +980,14 @@ Today's date: {_today}.""",
 
 
 def _prewarm(proc: JobProcess) -> None:
+    # Phone callers take pauses mid-sentence ("mujhe Tuesday ki ... booking
+    # karni hai"). Short silence detection made the agent jump in before the
+    # sentence finished, so the VAD now waits ~0.65s of quiet and keeps a wider
+    # prefix so the first syllable is never clipped.
     proc.userdata["vad"] = silero.VAD.load(
         activation_threshold=0.3,
-        min_silence_duration=0.2,
-        prefix_padding_duration=0.25,
+        min_silence_duration=0.65,
+        prefix_padding_duration=0.4,
     )
 
 
@@ -987,7 +1020,7 @@ async def my_agent(ctx: agents.JobContext):
             turn_detection=_turn_detection(),
             endpointing={
                 "mode": "dynamic",
-                "min_delay": 0.25,
+                "min_delay": 0.6,
                 "max_delay": ENDPOINTING_MAX_DELAY,
             },
             interruption={
