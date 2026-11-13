@@ -56,7 +56,7 @@ async def main() -> None:
     async with utils.http_context.open():
         print("\nTTS routing:")
         tts.update_options(language="ur", voice=agent.TTS_VOICE_UR)
-        await synth(tts, "جی بالکل، میں دیکھتا ہوں۔", "ur → Edge Asad")
+        await synth(tts, "جی بالکل، میں دیکھتا ہوں۔", "ur → Cartesia sonic-3.6")
         tts.update_options(language="en", voice=agent.TTS_VOICE_EN)
         await synth(tts, "Sure, let me check that for you.", "en → Deepgram Aura")
 

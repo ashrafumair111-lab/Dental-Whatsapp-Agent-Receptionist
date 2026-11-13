@@ -884,6 +884,9 @@ wheels = [
 ]
 
 [package.optional-dependencies]
+cartesia = [
+    { name = "livekit-plugins-cartesia" },
+]
 codecs = [
     { name = "numpy" },
 ]
@@ -990,6 +993,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e4/7a/a9b3b196263f4dcffdbd9066c72003df6ffee32621553cec35492cdc4e0f/livekit_plugins_azure-1.8.11.tar.gz", hash = "sha256:be061a76cedded55284e1c7790b8bfcd7017e51c4ea73b23a1b508876aee2ac5", size = 32800, upload-time = "2026-11-05T19:45:27.281Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/e9/43f181c31ab8edb6608df9b98286e76b606562dc59f87d4af882052fab10/livekit_plugins_azure-1.8.11-py3-none-any.whl", hash = "sha256:38b85ed04154a03d4cec36cd8f6fe407dfd052a31114a1dab290649df50a466b", size = 36631, upload-time = "2026-11-05T19:45:25.998Z" },
+]
+
+[[package]]
+name = "livekit-plugins-cartesia"
+version = "1.8.11"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "livekit-agents" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/57/42/22c431720670c854b0d33ae6ff845ece6d56d679574033c761055c071af5/livekit_plugins_cartesia-1.8.11.tar.gz", hash = "sha256:62d14f09c082c9dc17795767405764bacef35daf47b619b7674e5c028efb8eba", size = 20215, upload-time = "2026-11-05T19:45:49.161Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/82/171a8d0a68f1631b38949e51083a37d4b5cce9654e601548543718008a33/livekit_plugins_cartesia-1.8.11-py3-none-any.whl", hash = "sha256:c42992e1730501ba990305a51013fbc6541ee730be158ba1d8d793d231786a4f", size = 27897, upload-time = "2026-11-05T19:45:47.884Z" },
 ]
 
 [[package]]
@@ -1926,7 +1941,7 @@ dependencies = [
     { name = "av" },
     { name = "edge-tts" },
     { name = "httpx" },
-    { name = "livekit-agents" },
+    { name = "livekit-agents", extra = ["cartesia"] },
     { name = "livekit-plugins-ai-coustics" },
     { name = "livekit-plugins-azure" },
     { name = "livekit-plugins-deepgram" },
@@ -1948,7 +1963,7 @@ requires-dist = [
     { name = "av", specifier = ">=12.0" },
     { name = "edge-tts", specifier = ">=6.1" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "livekit-agents", specifier = ">=1.8.11" },
+    { name = "livekit-agents", extras = ["cartesia"], specifier = ">=1.8.11" },
     { name = "livekit-plugins-ai-coustics", specifier = ">=0.2" },
     { name = "livekit-plugins-azure", specifier = ">=1.8" },
     { name = "livekit-plugins-deepgram", specifier = ">=1.8" },
