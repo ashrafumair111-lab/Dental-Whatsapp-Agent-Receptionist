@@ -1,12 +1,13 @@
 """Mike — the dental clinic receptionist (English).
 
-Small on purpose:
+Deliberately small and deterministic where it matters:
 
-- STT: Deepgram nova-3 (English).
-- TTS: Deepgram Aura. One voice, English.
-- One question per reply; 1-2 short sentences.
-- The only two tools are check_availability and create_booking; the booking
-  collects and confirms the caller's email and phone itself.
+- STT: Deepgram nova-3 (English) for the whole call.
+- TTS: Deepgram Aura (aura-2-arcas-en). One voice, everywhere.
+- The LLM (Groq gpt-oss-120b) handles the greeting, clinic questions and the
+  day/time. Every stage after the time is saved (name -> phone -> email ->
+  booking) is spoken by code — one question, exactly once, never repeated.
+- One question per reply, enforced on the model stream.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -25,14 +27,14 @@ from livekit.agents import (
     Agent,
     JobProcess,
     TurnHandlingOptions,
-    llm as llm_mod,
     room_io,
+    llm as llm_mod,
 )
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.metrics import LLMMetrics, STTMetrics, TTSMetrics
 from livekit.plugins import ai_coustics, deepgram, openai, silero
 
-from cal_tools import CalToolset, now_local
+from cal_tools import CalToolset, _spell_back, now_local, format_when
 
 logger = logging.getLogger("clinic")
 logger.setLevel(logging.INFO)
@@ -70,6 +72,9 @@ def _week_ahead() -> str:
     return "; ".join(rows)
 
 
+# --------------------------------------------------------------------------- #
+# Metrics                                                                      #
+# --------------------------------------------------------------------------- #
 async def _display_llm_metrics(metrics: LLMMetrics) -> None:
     logger.info(
         "LLM | TTFT=%.2fs | %d in / %d out | tok/s=%.1f",
@@ -111,40 +116,9 @@ def _build_llm():
     return llm_mod.FallbackAdapter([make(primary), make(fallback)], attempt_timeout=8.0)
 
 
-def _cut_after_question(text: str) -> tuple[str, bool]:
-    cut = min((i for i in (text.find("?"), text.find("؟")) if i >= 0), default=-1)
-    return (text[: cut + 1], True) if cut >= 0 else (text, False)
-
-
-async def _one_question_only(stream):
-    """Let at most one question through; drop the rest of the reply."""
-    finished = False
-    async for item in stream:
-        if isinstance(item, str):
-            if finished:
-                continue
-            text, finished = _cut_after_question(item)
-            if text:
-                yield text
-            continue
-        delta = getattr(item, "delta", None)
-        content = getattr(delta, "content", None) if delta is not None else None
-        if delta is None or not content:
-            yield item
-            continue
-        if finished:
-            text = ""
-        else:
-            text, finished = _cut_after_question(content)
-        if text:
-            if text != content:
-                item.delta.content = text
-            yield item
-        elif getattr(delta, "tool_calls", None):
-            item.delta.content = None
-            yield item
-
-
+# --------------------------------------------------------------------------- #
+# Stripping gpt-oss envelopes                                                    #
+# --------------------------------------------------------------------------- #
 _THINK_OPEN = ("<think>", "<|start|>assistant<|channel|>analysis", "<|channel|>analysis<|message|>")
 _THINK_CLOSE = ("</think>", "<|end|>")
 _STRAY_CLEAN = ("<|start|>", "<|channel|>final<|message|>", "<|message|>", "<|end|>", "<|start|>assistant")
@@ -170,44 +144,157 @@ async def _without_reasoning_envelopes(stream):
         for tag in _STRAY_CLEAN:
             text = text.replace(tag, "")
         if in_think or not text:
-            continue  # drain the stream, but never speak reasoning
+            continue
         delta.content = text
         yield item
 
 
-GREETING = f"Hi, this is Mike from {_company_name}. How may I help you today?"
+def _cut_after_question(text: str, spoken: int) -> tuple[str, bool]:
+    min_cut = -1
+    for marker in ("?", "؟"):
+        i = text.find(marker)
+        if i >= 0 and (min_cut < 0 or i < min_cut):
+            min_cut = i
+    if min_cut >= 0:
+        return text[: min_cut + 1], True
+    return text, spoken > 300 and bool(re.search(r"[.!۔\n]", text))
+
+
+async def _one_question_only(stream):
+    """Let at most one question through; drop the rest of the reply."""
+    spoken = 0
+    finished = False
+    async for item in stream:
+        if isinstance(item, str):
+            if finished:
+                continue
+            text, finished = _cut_after_question(item, spoken)
+            spoken += len(text)
+            if text:
+                yield text
+            continue
+        delta = getattr(item, "delta", None)
+        content = getattr(delta, "content", None) if delta is not None else None
+        if delta is None or not content:
+            yield item
+            continue
+        if finished:
+            text = ""
+        else:
+            text, finished = _cut_after_question(content, spoken)
+            spoken += len(text)
+        if text:
+            if text != content:
+                item.delta.content = text
+            yield item
+        elif getattr(delta, "tool_calls", None):
+            item.delta.content = None
+            yield item
+
+
+# --------------------------------------------------------------------------- #
+# Fixed lines spoken by code — the flow decides which one                       #
+# --------------------------------------------------------------------------- #
+_LINES: dict[str, str] = {
+    "ask_name": "Okay. May I have your name, please?",
+    "reask_name": "Sorry, I didn't catch that. What's your name?",
+    "ask_phone": "Thank you. And your phone number?",
+    "reask_phone": "Sorry, could you say the full number once more?",
+    "more_phone": "Go on, I'm listening.",
+    "ask_email": "Thanks. Now your email, letter by letter? Say no if you don't have one.",
+    "reask_email": "Sorry, please say your email again, letter by letter?",
+    "go_on_email": "Okay, go on?",
+    "readback_again": "Please say yes or no. Is the email correct?",
+    "booking": "Okay, booking it now.",
+    "failed": "Sorry, that time just got taken. Could you pick another time?",
+}
+
+
+def _scripted_line(key: str, flow) -> str:
+    if key == "readback":
+        spelled = _spell_back(flow.pending_email or "")
+        return f"Your email is {spelled}. Is that correct?"
+    return _LINES[key]
+
+
+def _booked_line(when_iso: str) -> str:
+    date, clock = when_iso.split(" ", 1)
+    return f"All set! Your appointment is booked for {format_when(date, clock)}. Anything else?"
+
+
+# Stages where the caller answers with a name / digits / letters; anything
+# said there tells the flow (not the language engine) what is happening.
+_STRUCTURED_STAGES = ("name", "phone", "email", "confirm_email")
 
 
 class Assistant(Agent):
     def __init__(self) -> None:
         end_call = EndCallTool()
-        self.cal_tools = CalToolset()
+        self.cal_tools = CalToolset(fallback_email=_company_email)
+        self.flow = self.cal_tools.flow
         today = now_local().strftime("%A, %Y-%m-%d")
         super().__init__(
-            instructions=f"""You are Mike, a warm, friendly receptionist at {_company_name}, on a live phone call. Keep it short and human.
+            instructions=f"""You are Mike, a warm, friendly receptionist at {_company_name}, on a live phone call.
 
-- Reply in English only. One question at a time; 1-2 short sentences. Never list steps or say "waiting", "saved" or "checking".
+- English only. One question at a time; 1-2 short sentences. Never list steps or say "waiting", "saved" or "checking".
 
-BOOKING:
-- First find the day and the time they want. Convert "tomorrow" and weekday names using this table (Asia/Karachi is UTC+5): {_week_ahead()}
-- Then ask their name.
-- Then call create_booking(start_time=..., attendee_name=...) and say nothing else in that turn. `start_time` is clinic-local as 'YYYY-MM-DD HH:MM' ("2026-11-20 15:30" = 3:30 PM). create_booking asks for and confirms the caller's email and their phone itself — never ask for them yourself, never invent them.
-- A dental visit is 30 minutes with the doctor.
-- Only say "booked" after create_booking confirms.
-
-CANCEL OR RESCHEDULE:
-- There is no self-service cancel or reschedule. Ask for the booking UID and their name, then say the clinic team will help and they should call us again. Never invent a booking.
+BOOKING (the system handles everything except the day and the time):
+- You only need the DAY and the TIME. Ask for whichever is missing, one question at a time.
+- The moment BOTH are known, call set_appointment_time and say nothing else in that turn. Use clinic-local values: appointment_date as YYYY-MM-DD, appointment_time as 24-hour HH:MM. A bare hour from 1 to 8 means PM (3 baje = 15:00); 9 to 11 means AM.
+- Never ask for the name, phone or email yourself. The system asks for them automatically right after the time is saved. If the caller asks a side question there, answer it in one short sentence, then ask only what the BOOKING STATE note says comes next.
+- If set_appointment_time says NOT_AVAILABLE, offer two of the free times in one short question.
+- After the appointment is booked, if the caller has nothing else, say a short goodbye and call end_call.
+- Cancel or reschedule: ask for the booking UID and their name, say the clinic team will help, and let the caller know they can call us again.
 
 - Stay on dental clinic topics. If you don't know something, say so honestly. Never invent services, prices or hours.
 Services: {_company_services_block}
 Company: {_company_legal} (trading as {_company_name}) — {_company_address}; Phone {_company_phone}; Email {_company_email}. Share only when asked.
 
+Dates (Asia/Karachi is UTC+5): {_week_ahead()}
 Today: {today}.""",
             tools=[*end_call.tools, self.cal_tools],
         )
 
+    async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
+        """Capture booking data exactly once per committed caller turn."""
+        text = (new_message.text_content or "").strip()
+        if not text:
+            return
+        before = self.flow.stage
+        self.flow.handle_user_text(text)
+        if self.flow.stage != before or self.flow.reask_key or self.flow.deferred:
+            logger.info("FLOW | %s -> %s | reask=%s | %s", before, self.flow.stage, self.flow.reask_key, self.flow.describe())
+
+    async def _booking_lines(self):
+        if self.flow.stage == "booking" and not self.flow.booking_announced:
+            self.flow.booking_announced = True
+            yield _scripted_line("booking", self.flow) + " "
+        await self.cal_tools.run_booking()
+        notice, self.flow.notice = self.flow.notice, None
+        if notice:
+            kind, when = notice
+            yield _booked_line(when) if kind == "booked" else _scripted_line("failed", self.flow)
+
     async def llm_node(self, chat_ctx, tools, model_settings):
-        chat_ctx.truncate(max_items=16)
+        # 1) Code owns the booking questions: name, phone, email, read-back and
+        #    the booking itself. The LLM never sees these turns.
+        key = self.flow.next_directive()
+        if key in ("booking", "notice"):
+            async for line in self._booking_lines():
+                yield line
+            return
+        if key:
+            logger.info("FLOW | say %s", key)
+            yield _scripted_line(key, self.flow)
+            return
+
+        # 2) Everything else is the LLM's job, with a one-line note of what is
+        #    already captured so it never asks twice.
+        chat_ctx.truncate(max_items=20)
+        note = self.flow.state_note()
+        if note:
+            chat_ctx.add_message(role="system", content=note)
+
         stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
         if asyncio.iscoroutine(stream):
             stream = await stream
@@ -230,10 +317,8 @@ Today: {today}.""",
         self.session.stt.on("metrics_collected", _stt_wrapper)
         self.session.tts.on("metrics_collected", _tts_wrapper)
 
-        # Warm today's slots while the greeting plays.
         self._prewarm_task = asyncio.create_task(self.cal_tools.prewarm())
-
-        self.session.say(GREETING)
+        self.session.say(f"Hi, this is Mike from {_company_name}. How may I help you today?")
 
     async def on_exit(self) -> None:
         task = getattr(self, "_prewarm_task", None)
