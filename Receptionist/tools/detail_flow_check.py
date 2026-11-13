@@ -17,25 +17,7 @@ load_dotenv(".env.local")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import agent  # noqa: E402
-from cal_tools import CalToolset, phone_from_speech  # noqa: E402
-from livekit.agents.llm import ChatContext  # noqa: E402
-from livekit.agents.voice.agent import ModelSettings  # noqa: E402
-
-
-def fresh() -> agent.Assistant:
-    a = agent.Assistant()
-    a._lang_state["lang"] = "ur"
-    return a
-
-
-def ask(assistant: agent.Assistant, *pairs: tuple[str, str]) -> str:
-    ctx = ChatContext()
-    ctx.add_message(role="system", content=assistant.instructions)
-    for role, content in pairs:
-        ctx.add_message(role=role, content=content)
-    out = asyncio.run(assistant.llm_node(ctx, [], ModelSettings()))
-    return out if isinstance(out, str) else "<STREAM (model called)>"
-
+from cal_tools import BookingFlow, CalToolset, phone_from_speech, _name_candidate  # noqa: E402
 
 fails = 0
 
@@ -44,62 +26,69 @@ for text, want in [
     ("0300 1234567", "+923001234567"),
     ("mera number 0300-1234567 hai", "+923001234567"),
     ("0300-123 4567", "+923001234567"),
+    ("number zero three hundred one two three four five six seven", None),
     ("no digits here", None),
     ("2026", None),
 ]:
     got = phone_from_speech(text)
     ok = got == want
     fails += 0 if ok else 1
-    print(f"{'OK  ' if ok else 'FAIL'} {text!r:34} -> {got!r}")
+    print(f"{'OK  ' if ok else 'FAIL'} {text!r:56} -> {got!r}")
 
 print("\n_name_candidate:")
 for text, want in [
     ("Ali Khan", "Ali Khan"),
     ("mera naam Ali Khan hai", "Ali Khan"),
+    ("mera naam Ali hai", "Ali"),
     ("my name is Ali Khan", "Ali Khan"),
     ("Ali 0300 1234567", "Ali"),
     ("haan", None),
     ("0300 1234567", None),
+    ("aap ka clinic kahan hai", None),
 ]:
-    got = agent._name_candidate(text)
+    got = _name_candidate(text)
     ok = got == want
     fails += 0 if ok else 1
     print(f"{'OK  ' if ok else 'FAIL'} {text!r:34} -> {got!r}")
 
-print("\nchain (each detail asked once, never repeated):")
-a = fresh()
-out = ask(a, ("assistant", "آپ کا نام بتا دیں؟"), ("user", "Ali Khan"))
-ok = out == agent._phone_prompt_line("ur") and a.cal_tools.name == "Ali Khan"
+print("\nchain: name -> phone -> email, each asked exactly once:")
+flow = BookingFlow()
+flow.set_slot("2026-11-21", "10:00")
+flow.handle_user_text("Ali Khan")
+ok = flow.name == "Ali Khan" and flow.stage == "phone"
+print(f"{'OK  ' if ok else 'FAIL'} name captured -> stage={flow.stage} name={flow.name!r}")
 fails += 0 if ok else 1
-print(f"{'OK  ' if ok else 'FAIL'} name turn -> {out!r} (name={a.cal_tools.name!r})")
 
-out = ask(a, ("assistant", agent._phone_prompt_line("ur")), ("user", "0300 1234567"))
-ok = out == agent._email_spell_line("ur") and a.cal_tools.phone == "+923001234567"
+flow.handle_user_text("0300 1234567")
+ok = flow.phone == "+923001234567" and flow.stage == "email"
+print(f"{'OK  ' if ok else 'FAIL'} phone captured -> stage={flow.stage} phone={flow.phone!r}")
 fails += 0 if ok else 1
-print(f"{'OK  ' if ok else 'FAIL'} phone turn -> {out!r} (phone={a.cal_tools.phone!r})")
 
-out = ask(a, ("assistant", agent._email_spell_line("ur")), ("user", "s m i t h at gmail dot com"))
-ok = out == agent._readback_line("smith@gmail.com", "ur") and a.cal_tools.email == "smith@gmail.com"
-fails += 0 if ok else 1
-print(f"{'OK  ' if ok else 'FAIL'} email turn -> {out!r}")
+print("directive after capture:", flow.next_directive())
 
 print("\nname and phone in one breath:")
-b = fresh()
-out = ask(b, ("assistant", "آپ کا نام بتا دیں؟"), ("user", "Ali Khan 0300 1234567"))
-ok = (
-    out == agent._email_spell_line("ur")
-    and b.cal_tools.name == "Ali Khan"
-    and b.cal_tools.phone == "+923001234567"
-)
+flow = BookingFlow()
+flow.set_slot("2026-11-21", "10:00")
+flow.handle_user_text("Ali Khan 0300 1234567")
+ok = flow.name == "Ali Khan" and flow.phone == "+923001234567" and flow.stage == "email"
+print(f"{'OK  ' if ok else 'FAIL'} captured name={flow.name!r} phone={flow.phone!r} stage={flow.stage}")
 fails += 0 if ok else 1
-print(f"{'OK  ' if ok else 'FAIL'} combined -> {out!r} (name={b.cal_tools.name!r} phone={b.cal_tools.phone!r})")
 
-print("\nbooking uses what was captured:")
+print("\nquestion-style replies are deferred, not consumed as answers:")
+flow = BookingFlow()
+flow.set_slot("2026-11-21", "10:00")
+flow.handle_user_text("aap ka clinic kahan hai")
+ok = flow.name is None and flow.stage == "name" and flow.deferred
+print(f"{'OK  ' if ok else 'FAIL'} deferred={flow.deferred} stage={flow.stage} name={flow.name!r}")
+fails += 0 if ok else 1
+
+print("\nbooking body uses what was captured:")
 async def check_booking() -> bool:
-    toolset = CalToolset()
-    toolset.set_name("Ali Khan")
-    toolset.set_phone("+923001234567")
-    toolset.set_email("smith@gmail.com")
+    toolset = CalToolset(fallback_email="clinic@example.com")
+    f = toolset.flow
+    f.set_slot("2026-11-21", "15:30")
+    for spoken in ("Ali Khan", "0300 1234567", "s m i t h at gmail dot com", "haan"):
+        f.handle_user_text(spoken)
     sent: list[dict] = []
 
     async def fake_post(path: str, body: dict, version: str | None = None) -> dict:
@@ -107,16 +96,22 @@ async def check_booking() -> bool:
         return {"data": {"uid": "TEST123", "start": body["start"]}}
 
     toolset._post = fake_post  # type: ignore[method-assign]
-    tools = {t.info.name: t for t in toolset.tools}
-    out = await tools["create_booking"](None, start_time="2026-11-20T09:00:00Z")
+    await toolset.run_booking()
     await toolset.aclose()
-    attendee = sent[0]["attendee"]
-    return attendee["name"] == "Ali Khan" and attendee["phoneNumber"] == "+923001234567" and attendee["email"] == "smith@gmail.com"
+    if not sent:
+        print("FAIL: run_booking did not POST")
+        return False
+    attendee = sent[0].get("attendee", {})
+    return (
+        attendee.get("name") == "Ali Khan"
+        and attendee.get("email") == "smith@gmail.com"
+        and attendee.get("phoneNumber") == "+923001234567"
+    )
 
 try:
     ok = asyncio.run(check_booking())
 except Exception as exc:  # noqa: BLE001
-    print(f"FAIL: {exc}")
+    print(f"FAIL: {type(exc).__name__}: {exc}")
     ok = False
 fails += 0 if ok else 1
 print(f"{'OK  ' if ok else 'FAIL'} booking body uses stored name/phone/email")

@@ -28,7 +28,7 @@ def main() -> None:
     src = inspect.getsource(sys.modules["agent"])
     marker = "instructions=f\"\"\""
     i = src.index(marker) + len(marker)
-    j = src.index('Today\'s date: {_today}."""', i)
+    j = src.index('"""', i)
     body = src[i:j]
     # rough token estimate: 4 chars/token
     print(f"prompt chars={len(body)} ~{len(body)//4} tokens (static part, real call adds tool schemas)")

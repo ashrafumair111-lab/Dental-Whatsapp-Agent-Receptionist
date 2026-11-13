@@ -1,6 +1,4 @@
-"""Check the code-owned email flow: capture from speech, then one fixed read-back.
-
-No LLM call and no network: this is the exact path the agent takes.
+"""Check the email flow inside BookingFlow: capture -> read back -> confirm.
 
 Run:  .venv\\Scripts\\python.exe tools/email_flow_check.py
 """
@@ -18,87 +16,70 @@ load_dotenv(".env.local")
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import agent  # noqa: E402
-from cal_tools import email_from_speech  # noqa: E402
-from livekit.agents.llm import ChatContext  # noqa: E402
-
-CASES = [
-    (
-        "meri email ali at gmail dot com hai",
-        "ur",
-        "آپ کی email a l i at gmail dot com ہے، sahi hai؟",
-    ),
-    (
-        "my email is ali at gmail dot com",
-        "en",
-        "Your email is a l i at gmail dot com — is that right?",
-    ),
-    (
-        "email hai s m i t h at hotmail dot com",
-        "ur",
-        "آپ کی email s m i t h at hotmail dot com ہے، sahi hai؟",
-    ),
-]
+from cal_tools import BookingFlow  # noqa: E402
 
 fails = 0
-for said, lang, want in CASES:
-    email = email_from_speech(said)
-    line = agent._readback_line(email, lang) if email else "<no email>"
-    ok = line == want
+
+
+def booked_with_email(spelled: str) -> BookingFlow:
+    flow = BookingFlow(fallback_email="clinic@example.com")
+    flow.set_slot("2026-11-21", "10:00")
+    flow.handle_user_text("Ali Khan")            # -> phone
+    flow.handle_user_text("0300 1234567")         # -> email
+    flow.handle_user_text(spelled)                # -> confirm_email
+    return flow
+
+
+print("read-back line:")
+flow = booked_with_email("s m i t h at gmail dot com")
+print("pending:", flow.pending_email, "| stage:", flow.stage)
+ok = flow.stage == "confirm_email" and flow.pending_email == "smith@gmail.com"
+fails += 0 if ok else 1
+for lang, marker in (("en", "Your email"), ("ur", "صحیح ہے")):
+    line = agent._scripted_line("readback", lang, flow)
+    ok = marker in line and "s m i t h" in line
     fails += 0 if ok else 1
-    print(f"{'OK  ' if ok else 'FAIL'} {said!r}")
-    print(f"      {line!r}")
+    print(f"{'OK  ' if ok else 'FAIL'} [{lang}] {line!r}")
 
-# Non-email turns must not trigger a read-back.
-for said in ("Tuesday ki booking karni hai", "0300 1234567", "haan sahi hai"):
-    if email_from_speech(said) is None:
-        print(f"OK   no read-back for {said!r}")
-    else:
-        fails += 1
-        print(f"FAIL: false email in {said!r}")
+print("\nconfirming/correcting both work:")
+flow = booked_with_email("ali at gmail dot com")
+flow.handle_user_text("nahi")
+ok1 = flow.stage == "email" and flow.pending_email is None and flow.reask_key == "reask_email"
+print(f"{'OK  ' if ok1 else 'FAIL'} correction returns to email (reask={flow.reask_key})")
+flow = booked_with_email("ali at gmail dot com")
+flow.handle_user_text("bilkul sahi hai")
+ok2 = flow.email == "ali@gmail.com" and flow.stage == "booking"
+print(f"{'OK  ' if ok2 else 'FAIL'} yes confirms and advances to booking (stage={flow.stage} email={flow.email})")
+fails += (0 if ok1 else 1) + (0 if ok2 else 1)
 
-# The capture looks at the last two caller turns (a slow, split reply).
-ctx = ChatContext()
-ctx.add_message(role="assistant", content="Email bata dein?")
-ctx.add_message(role="user", content="meri email s m i t h")
-ctx.add_message(role="assistant", content="Theek hai.")
-ctx.add_message(role="user", content="at gmail dot com")
-joined = agent._recent_user_text(ctx)
-if "s m i t h" in joined and "at gmail dot com" in joined:
-    print(f"OK   recent user text = {joined!r}")
-else:
-    fails += 1
-    print(f"FAIL: recent user text = {joined!r}")
+print("\nskip email on request:")
+flow = BookingFlow(fallback_email="clinic@example.com")
+flow.set_slot("2026-11-21", "10:00")
+flow.handle_user_text("Ali Khan")
+flow.handle_user_text("0300 1234567")
+flow.handle_user_text("email nahi hai")
+print("stage:", flow.stage, "| skipped:", flow.email_skipped)
+ok = flow.email_skipped and flow.stage == "booking"
+fails += 0 if ok else 1
+print(f"{'OK  ' if ok else 'FAIL'} caller opts out of giving an email")
 
-# The email question is capped at two: count the asks, and make sure the
-# move-on line does not itself count as an email question.
-asks = ChatContext()
-asks.add_message(role="assistant", content="Hi, how can I help?")
-asks.add_message(role="assistant", content="Aap ka email bata dein?")
-if agent._email_ask_count(asks) == 1:
-    print("OK   email ask counted (1)")
-else:
-    fails += 1
-    print(f"FAIL: ask count {agent._email_ask_count(asks)}")
+print("\nemail asked at most MAX_EMAIL_TRIES times, then skipped:")
+flow = BookingFlow()
+flow.set_slot("2026-11-21", "10:00")
+flow.handle_user_text("Ali Khan")
+flow.handle_user_text("0300 1234567")
+for _ in range(4):
+    flow.handle_user_text("blah blah blah")
+ok = flow.email_skipped and flow.stage == "booking"
+print(f"{'OK  ' if ok else 'FAIL'} after 4 attempts: skipped={flow.email_skipped} stage={flow.stage}")
+fails += 0 if ok else 1
 
-asks.add_message(role="assistant", content="Email address?")
-if agent._email_ask_count(asks) == 2:
-    print("OK   email ask counted (2 -> cap reached)")
-else:
-    fails += 1
-    print(f"FAIL: ask count {agent._email_ask_count(asks)}")
-
-for lang in ("en", "ur"):
-    line = agent._skip_email_line(lang)
-    if "email" in line.lower() or "ای میل" in line:
-        fails += 1
-        print(f"FAIL: move-on line still mentions email: {line!r}")
-    else:
-        print(f"OK   move-on line ({lang}) = {line!r}")
-asks.add_message(role="assistant", content=agent._skip_email_line("en"))
-if agent._email_ask_count(asks) == 2:
-    print("OK   move-on line is not counted as another ask")
-else:
-    fails += 1
-    print(f"FAIL: ask count after move-on {agent._email_ask_count(asks)}")
+print("\nside question is deferred, order is kept:")
+flow = BookingFlow()
+flow.set_slot("2026-11-21", "10:00")
+flow.handle_user_text("aap ka clinic kahan hai")
+ok = flow.deferred and flow.stage == "name"
+print(f"{'OK  ' if ok else 'FAIL'} deferred={flow.deferred} stage={flow.stage}")
+fails += 0 if ok else 1
 
 print("\nresult:", "PASS" if fails == 0 else f"{fails} FAILED")

@@ -39,7 +39,7 @@ async def main() -> None:
         for i in range(0, len(raw), 4):
             yield raw[i : i + 4]
 
-    guarded = "".join([c async for c in agent._first_question_only(replay())])
+    guarded = "".join([c async for c in agent._one_question_only(replay())])
     print("\nraw    :", raw.strip())
     print("spoken :", guarded.strip())
     await llm.aclose()
