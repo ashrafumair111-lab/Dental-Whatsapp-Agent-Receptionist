@@ -338,8 +338,7 @@ class CalToolset(llm.Toolset):
                 "end": date,
                 "timeZone": caller_timezone,
             }
-            async with ctx.with_filler("Let me check that for you.", delay=0.5):
-                data = await self._get("/slots", params=params, version="2024-09-04")
+            data = await self._get("/slots", params=params, version="2024-09-04")
             slots = data.get("data", {}).get(date, [])
             _set_cached_slots(cache_key, slots)
 
@@ -373,8 +372,9 @@ class CalToolset(llm.Toolset):
         self._email = email
         return (
             f"Email saved: {email}.\n"
-            f'Read this back once: "{_spell_back(email)}" — is that right?\n'
-            "If they confirm, call create_booking now. Never ask for the email again."
+            f'Say this back once, in the caller\'s language: "Your email is {_spell_back(email)} — is that right?"\n'
+            "Then wait for their answer. If they confirm, move to the phone number. "
+            "Never ask for the email again."
         )
 
     @llm.function_tool
@@ -408,8 +408,9 @@ class CalToolset(llm.Toolset):
                 "phoneNumber": resolved_phone,
             },
         }
-        async with ctx.with_filler("One moment, I'm confirming your booking.", delay=0.5):
-            data = await self._post("/bookings", body=body)
+        # Silent by design: the agent has already told the caller it is booking,
+        # and any spoken filler here plays as a second, confusing voice line.
+        data = await self._post("/bookings", body=body)
 
         booking = data.get("data", {})
         uid = booking.get("uid", "unknown")
@@ -437,8 +438,7 @@ class CalToolset(llm.Toolset):
         if reason:
             body["reschedulingReason"] = reason
 
-        async with ctx.with_filler("One moment, I'm working on that.", delay=0.5):
-            data = await self._post(f"/bookings/{booking_uid}/reschedule", body=body)
+        data = await self._post(f"/bookings/{booking_uid}/reschedule", body=body)
 
         booking = data.get("data", {})
         new_start_val = booking.get("start", new_start)
@@ -456,7 +456,6 @@ class CalToolset(llm.Toolset):
         if reason:
             body["cancellationReason"] = reason
 
-        async with ctx.with_filler("One moment, I'm working on that.", delay=0.5):
-            await self._post(f"/bookings/{booking_uid}/cancel", body=body)
+        await self._post(f"/bookings/{booking_uid}/cancel", body=body)
 
         return "Booking cancelled successfully."
