@@ -36,42 +36,43 @@ SERVICES = "\n".join(f"- {s.strip()}" for s in os.environ.get("COMPANY_SERVICES"
     or "- (No service list configured; be honest about what you don't know.)"
 
 
+UR_DAYS = ["پیر", "منگل", "بدھ", "جمعرات", "جمعہ", "ہفتہ", "اتوار"]
+
+
 def week_ahead() -> str:
     today = now()
     rows = []
     for i in range(8):
         d = today + timedelta(days=i)
-        tag = " (today)" if i == 0 else " (tomorrow)" if i == 1 else ""
-        rows.append(f"{DAYS[d.weekday()]} = {d:%Y-%m-%d}{tag}")
+        tag = " (آج)" if i == 0 else " (کل)" if i == 1 else ""
+        rows.append(f"{UR_DAYS[d.weekday()]} = {d:%Y-%m-%d}{tag}")
     return "; ".join(rows)
 
 
 def instructions() -> str:
-    return f"""You are Mike, the friendly receptionist at {COMPANY}, on a live phone call.
-Reply in the caller's language (Urdu in -> Urdu out, English in -> English out; dental words may stay English).
-Keep every reply to 1-2 short sentences and ask only ONE question at a time.
+    return f"""آپ ڈینٹل کلینک کے فرینڈلی ریسپشنسٹ مائیک ہیں، ایک لائیو فون کال پر۔ پورے جواب صرف اردو میں دیں — انگریزی الفاظ استعمال نہ کریں (صرف اشد ضروری بات، جیسے دوائی کے نام یا ویسے عام نام)۔ہر جواب 1-2 چھوٹی جملوں کا ہو اور ہمیشہ صرف ایک ہی سوال کریں۔
 
-BOOKING, in this order:
-1. Find the day and time. Dates: {week_ahead()}. Times are 24-hour in tools (3 baje = 15:00).
-   If the caller only gives one, ask for the other. Use check_availability if they ask what is free.
-2. Ask the name. Then ask the phone number.
-3. Ask the email, spelled letter by letter. If they have none, skip it.
-4. If an email was given, call read_back_email and read EXACTLY what it returns, then wait for yes/no.
-   If no: ask them to say it again, and read it back again.
-5. Call book_appointment, then tell the caller the booked time and ask if they need anything else.
+بکنگ کا ترتیب یہ ہے:
+1. پہلے دن اور وقت پوچھیں۔ تاریخیں: {week_ahead()}۔ ٹائم 24 گھنٹے ٹائم میں tools میں (3 بجے = 15:00)۔
+   اگر ایک بات ملی ہے تو دوسری پوچھیں۔ اگر مَریز پوچھے "کون سے ٹائم فارغ ہے" تو check_availability استعمال کریں۔
+2. نام پوچھیں۔ پھر فون نمبر پوچھیں۔
+3. ای میل پوچھیں، ہجے کے ساتھ۔ اگر مَریز کے پاس ای میل نہ ہو تو چھوڑ دیں۔
+4. اگر ای میل دی گئی ہے تو read_back_email کال کریں اور بالکل وہی الفاظ پڑھ کر سنائیں جو ٹول دے، پھر ہاں یا نہیں کا انتظار کریں۔
+   اگر نہیں تو ای میل دوبارہ کہلوائیں اور جواب دوبارہ پڑھ کر سنائیں۔
+5. phir book_appointment کال کریں اور مَریز کو بکنگ کا وقت بتا کر پوچھیں کچھ اور مدد چاہیے یا نہیں۔
 
-RULES:
-- Never ask for something the caller already told you. Look back at the conversation before every question.
-- Do NOT repeat or confirm the name or the phone number. Just say "Thank you" and move on.
-- Never say "booked" until book_appointment returns BOOKED.
-- If a time is not free, offer two nearby free times in one short question.
-- Stay on dental clinic topics. Answer prices, hours and services only from the info below, never invent;
-  if you don't know, say the clinic team will call back.
+اصول:
+- جو چیز مَریز پہلے بتا چکا ہو، وہ کبھی دوبارہ نہ پوچھیں۔ ہر سوال کرنے سے پہلے پوری بات چیت پڑھیں — اگر جواب پہلے ہی موجود ہے تو اس کا استعمال کریں، دوبارہ نہ پوچھیں۔
+- نام اور فون نمبر کبھی دہرائیے نہیں۔ صرف "شکریہ" کہہ کر آگے بڑھیں۔
+- "بکنگ ہو گئی" جب ہی کہیں جب book_appointment BOOKED دے۔
+- اگر جو ٹائم مانگا ہے وہ فارغ نہیں تو دو نزدیک کے وقت ایک مختصر سوال میں پیش کریں۔
+- صرف ڈینٹل کلینک کے موضوع پر رہیں۔ قیمتیں، گھنٹے اور سروسز صرف نیچے دی معلومات سے؛ کبھی ایجاد نہ کریں۔
+  اگر معلومات نہ ہوں تو کہیں کہ کلینک ٹیم واپس کال کرے گی۔
 
-Clinic: {LEGAL}, {ADDRESS}. Phone {PHONE}. Email {EMAIL}.
-Services:
+کلینک: {LEGAL}, {ADDRESS}. فون {PHONE}. ای میل {EMAIL}.
+خدمات:
 {SERVICES}
-Today: {now():%A, %Y-%m-%d}. A visit is 30 minutes."""
+آج: {now():%A, %Y-%m-%d}۔ وزٹ 30 منٹ کا ہے۔"""
 
 
 class Assistant(Agent):
@@ -159,7 +160,7 @@ class Assistant(Agent):
 
     # ----------------------------- lifecycle ------------------------------ #
     async def on_enter(self) -> None:
-        self.session.say(f"السلام علیکم! Hi, this is Mike from {COMPANY}. How may I help you? بتائیے؟")
+        self.session.say("السلام علیکم! یہ عمر اشرف ڈینٹل کلینک ہے، میں مائیک ہوں۔ بتائیے، کیا مدد کر سکتا ہوں؟")
 
     async def on_exit(self) -> None:
         await self.cal.aclose()
@@ -200,13 +201,18 @@ async def my_agent(ctx: agents.JobContext):
             model=ai_coustics.EnhancerModel.QUAIL_VF_S
         )
 
+    tts_instance = elevenlabs.TTS(
+        voice_id=os.environ.get("ELEVEN_VOICE_ID", "onwK4e9ZLuTAKqWW03F9"),
+        model=os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2"),
+        language="ur",
+    )
+    # Open the ElevenLabs websocket now so the first reply doesn't wait on a cold connect.
+    tts_instance.prewarm()
+
     session = AgentSession(
-        stt=deepgram.STT(model=os.environ.get("STT_MODEL", "nova-3").split("/")[-1], language="multi"),
+        stt=deepgram.STT(model=os.environ.get("STT_MODEL", "nova-3").split("/")[-1], language="ur"),
         llm=_build_llm(),
-        tts=elevenlabs.TTS(
-            voice_id=os.environ.get("ELEVEN_VOICE_ID", "onwK4e9ZLuTAKqWW03F9"),
-            model=os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2"),
-        ),
+        tts=tts_instance,
         vad=ctx.proc.userdata["vad"],
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
