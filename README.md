@@ -166,7 +166,7 @@ lk agent deploy --secrets-file .env.production --ignore-empty-secrets
 Mike sounds human, not scripted:
 
 - **Language follows the caller** — Urdu turn in → Urdu reply (Cartesia `sonic-3.6`, native Urdu delivery), English turn in → English reply; mixed dental terms (appointment, root canal, X-ray…) stay in English inside Urdu sentences; per-reply text routing keeps it clean
-- **Email verified by spelling** — before a booking is created the caller spells their email and it is read back letter by letter for confirmation; the model is told never to "fix" the spelling itself
+- **Email verified by spelling** — the caller's address is captured by a `save_email` tool the first time it is heard and read back letter by letter; `create_booking` reuses that stored address, so the model can never re-ask for it or quietly "fix" the spelling
 - **Warm, terse flow** — 1–2 sentences per reply, one question at a time, direct answers, no filler
 - **Tool fillers** — Cal.com calls run inside `ctx.with_filler()` with an immediate status update, so the agent never goes silent mid-booking
 - **Safety-first speech** — hidden reasoning/envelope text from the LLM is stripped before TTS (verified by unit tests)
@@ -177,7 +177,8 @@ Mike sounds human, not scripted:
 | Tool | Purpose |
 |------|---------|
 | `check_availability(date)` | Slots for a date (YYYY-MM-DD), with caching |
-| `create_booking(start_time, attendee_name, attendee_email, attendee_phone, ...)` | Book an appointment |
+| `save_email(spoken)` | Normalises a spelled-out address (`"s m i t h at gmail dot com"` → `smith@gmail.com`) and stores it for the booking |
+| `create_booking(start_time, attendee_name, attendee_phone, ...)` | Book an appointment (uses the email saved by `save_email`) |
 | `reschedule_booking(uid, new_start)` | Reschedule by booking UID |
 | `cancel_booking(uid)` | Cancel by booking UID |
 

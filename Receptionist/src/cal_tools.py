@@ -55,18 +55,103 @@ def _set_cached_slots(key: str, slots: list) -> None:
     _slots_cache[key] = (time.time(), slots)
 
 
+_EMAIL_FILLER = re.compile(
+    r"\b(?:my|the|this|email|e-mail|address|is|it'?s|that'?s|its|spelled|spell)\b",
+    re.IGNORECASE,
+)
+
+# Spoken symbols -> the character they stand for. Matched as whole words only,
+# so a real address like "ali.khan@x.com" is never touched.
+_SPOKEN_SYMBOLS = {
+    "at": "@",
+    "at the rate": "@",
+    "dot": ".",
+    "period": ".",
+    "point": ".",
+    "underscore": "_",
+    "under score": "_",
+    "dash": "-",
+    "hyphen": "-",
+    "minus": "-",
+    "plus": "+",
+}
+
+
+_SPELLED_RUN = re.compile(r"(?<![\w.\-])((?:[a-z0-9][.\-]){2,}[a-z0-9])(?![\w.\-])")
+
+
+def _collapse_spelled_letters(part: str) -> str:
+    """Join letters the caller spelled one by one: "s.m.i.t.h" -> "smith".
+
+    Only runs of three or more single-character segments are joined, so a
+    genuine address like "j.smith" keeps its dot.
+    """
+    return _SPELLED_RUN.sub(lambda m: re.sub(r"[.\-]", "", m.group(1)), part)
+
+
+def _normalize_spoken_email(raw: str) -> str:
+    """Turn anything a caller says into a real address.
+
+    Covers "john at example dot com", letter-by-letter spelling
+    ("s m i t h at gmail dot com", "s dot m dot i dot t dot h ..."),
+    "underscore"/"dash" words, and filler phrases such as "my email is".
+    """
+    text = (raw or "").strip().lower()
+    if not text:
+        return ""
+
+    # Already a typed address: leave it alone except for stray spaces.
+    if "@" in text:
+        return re.sub(r"\s+", "", text).rstrip(".,;:")
+
+    text = _EMAIL_FILLER.sub(" ", text)
+    # Longest phrases first so "at the rate" wins over "at".
+    for spoken in sorted(_SPOKEN_SYMBOLS, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(spoken)}\b", _SPOKEN_SYMBOLS[spoken], text)
+    # "gmail . com" / "gmail@com" style glitches from STT punctuation.
+    text = re.sub(r"\s*([@._\-+])\s*", r"\1", text)
+    text = re.sub(r"\s+", "", text)
+
+    if "@" not in text:
+        return text
+
+    local, _, domain = text.partition("@")
+    local = _collapse_spelled_letters(local)
+    domain = _collapse_spelled_letters(domain)
+    return f"{local}@{domain}".rstrip(".,;:")
+
+
 def _validate_email(raw: str) -> str:
-    email = (raw or "").strip()
-    if "@" not in email:
-        # Callers may speak it as "john at example dot com"; normalize that form.
-        email = re.sub(r"\s+at\s+", "@", email, flags=re.IGNORECASE)
-        email = re.sub(r"\s+dot\s+", ".", email, flags=re.IGNORECASE)
-    email = re.sub(r"\s+", "", email).rstrip(".,;:")
-    if not EMAIL_REGEX.match(email):
-        raise ToolError(
-            "That email didn't sound right. Ask the caller to repeat it once, slowly."
-        )
-    return email
+    email = _normalize_spoken_email(raw)
+    if email and EMAIL_REGEX.match(email):
+        return email
+    raise ToolError(
+        "I couldn't build a valid email from that. Read it back once the way you "
+        "heard it, ask them to fix only the wrong part, then try again."
+    )
+
+
+def _spell_back(email: str) -> str:
+    """Render an address the way a receptionist reads it back over the phone."""
+    local, _, domain = email.partition("@")
+
+    def _letters(part: str) -> str:
+        spoken = []
+        for ch in part:
+            if ch == ".":
+                spoken.append("dot")
+            elif ch == "_":
+                spoken.append("underscore")
+            elif ch == "-":
+                spoken.append("dash")
+            elif ch == "+":
+                spoken.append("plus")
+            else:
+                spoken.append(ch)
+        return " ".join(spoken)
+
+    domain_spoken = " dot ".join(domain.split("."))
+    return f"{_letters(local)} at {domain_spoken}"
 
 
 def _normalize_phone(raw: str) -> str:
@@ -132,6 +217,10 @@ class CalToolset(llm.Toolset):
         if not username:
             raise RuntimeError("CAL_USERNAME not set in environment")
         self._username = username
+        # Email captured once by save_email, so the model never has to hold the
+        # spelled-out address in its own context (that was the re-ask loop).
+        self._email: str | None = None
+        self._email_attempts = 0
         # One pooled client per call: keeps TLS connections warm between tools.
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(HTTP_TIMEOUT),
@@ -261,18 +350,67 @@ class CalToolset(llm.Toolset):
         return f"Available times on {date}: {listing}."
 
     @llm.function_tool
+    async def save_email(
+        self,
+        ctx: RunContext,
+        spoken: Annotated[
+            str,
+            "The email exactly as the caller said it, including letter-by-letter "
+            "spelling, 'at' and 'dot' — never cleaned up or corrected",
+        ],
+    ) -> str:
+        """Save the caller's email once and return the exact line to read back.
+
+        Call this the FIRST time the email is heard. It stores the address, so
+        create_booking does not need it again and the caller is never asked to
+        spell the same address twice.
+        """
+        try:
+            email = _validate_email(spoken)
+        except ToolError:
+            self._email_attempts += 1
+            if self._email_attempts < 3:
+                raise
+            # Third failure: stop the loop. Book under the clinic address and let
+            # the front desk confirm the caller's own address by phone.
+            email = os.environ.get("COMPANY_EMAIL", "umair@umairashrafdental.com")
+            self._email = email
+            self._email_attempts = 0
+            return (
+                f"Could not capture their email after three tries. The booking will use {email}. "
+                "Tell the caller the clinic will confirm their email by phone, then call "
+                "create_booking now. Do not ask for the email again."
+            )
+        self._email = email
+        self._email_attempts = 0
+        return (
+            f"Email saved: {email}.\n"
+            f'Read this back once: "{_spell_back(email)}" — is that right?\n'
+            "If they confirm (yes / haan / theek hai), call create_booking now. "
+            "Never ask them to spell the email again."
+        )
+
+    @llm.function_tool
     async def create_booking(
         self,
         ctx: RunContext,
         start_time: Annotated[str, "Start time in ISO 8601 UTC format, e.g. '2024-08-13T09:00:00Z'"],
         attendee_name: Annotated[str, "Caller's full name, spelled the way they gave it"],
-        attendee_email: Annotated[str, "Caller's email exactly as they spelled it — never correct or normalize the spelling"],
         attendee_phone: Annotated[str, "Caller's phone number exactly as they said it; any format is fine"],
         attendee_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] = "Asia/Karachi",
-        notes: Annotated[str | None, "Additional notes or reason for the visit"] = None,
     ) -> str:
-        """Book a dental appointment. Call only after date, time, name, email, and phone are confirmed."""
-        resolved_email = _validate_email(attendee_email)
+        """Book a dental appointment. Uses the email already captured by save_email.
+
+        Call this once name, phone, slot and email are confirmed. Never ask the
+        caller to repeat the email here — save_email already stored it.
+        """
+        raw_email = self._email or ""
+        if not raw_email:
+            raise ToolError(
+                "No email saved yet. Ask the caller to say their email once, "
+                "call save_email, then book."
+            )
+        resolved_email = _validate_email(raw_email)
         resolved_phone = _normalize_phone(attendee_phone)
 
         body = {
@@ -286,9 +424,6 @@ class CalToolset(llm.Toolset):
                 "phoneNumber": resolved_phone,
             },
         }
-        if notes:
-            body["bookingFieldsResponses"] = {"notes": notes}
-
         async with ctx.with_filler("One moment, I'm confirming your booking.", delay=0.5):
             data = await self._post("/bookings", body=body)
 
