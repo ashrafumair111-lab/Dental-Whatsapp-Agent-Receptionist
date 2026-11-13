@@ -274,6 +274,29 @@ def _normalize_phone(raw: str) -> str:
     return digits
 
 
+# A phone number keeps at least 9 digits and at most 15. Anything shorter is a
+# year or a slot count, not a number.
+_PHONE_CANDIDATE = re.compile(r"\+?[\d][\d\s\-()]{7,}[\d]")
+
+
+def phone_from_speech(text: str) -> str | None:
+    """Pull a phone number out of one caller transcript, else ``None``.
+
+    Never raises: a caller who says "mera number 0300 dash 1234567 hai" gets
+    +923001234567, and anything else falls through to the model.
+    """
+    match = _PHONE_CANDIDATE.search((text or "").strip())
+    if not match:
+        return None
+    digits = re.sub(r"\D", "", match.group(0))
+    if not 9 <= len(digits) <= 15:
+        return None
+    try:
+        return _normalize_phone(match.group(0))
+    except Exception:
+        return None
+
+
 def _format_time(iso_str: str, tz_name: str = "Asia/Karachi") -> str:
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
@@ -299,9 +322,11 @@ class CalToolset(llm.Toolset):
         if not username:
             raise RuntimeError("CAL_USERNAME not set in environment")
         self._username = username
-        # Email captured once from the caller's own words, so the model never
-        # has to hold the spelled-out address (that was the re-ask loop).
+        # Email, name and phone captured once from the caller's own words, so
+        # the model never has to hold them and cannot re-ask.
         self._email: str | None = None
+        self._name: str | None = None
+        self._phone: str | None = None
         # One pooled client per call: keeps TLS connections warm between tools.
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(HTTP_TIMEOUT),
@@ -316,9 +341,23 @@ class CalToolset(llm.Toolset):
         """Store the address captured from the caller's speech."""
         self._email = email or None
 
+    def set_name(self, name: str | None) -> None:
+        self._name = name or None
+
+    def set_phone(self, phone: str | None) -> None:
+        self._phone = phone or None
+
     @property
     def email(self) -> str | None:
         return self._email
+
+    @property
+    def name(self) -> str | None:
+        return self._name
+
+    @property
+    def phone(self) -> str | None:
+        return self._phone
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -442,25 +481,30 @@ class CalToolset(llm.Toolset):
         self,
         ctx: RunContext,
         start_time: Annotated[str, "Start time in ISO 8601 UTC format, e.g. '2024-08-13T09:00:00Z'"],
-        attendee_name: Annotated[str, "Caller's full name, spelled the way they gave it"],
-        attendee_phone: Annotated[str, "Caller's phone number exactly as they said it; any format is fine"],
+        attendee_name: Annotated[str | None, "Caller's full name; omit if already captured"] = None,
+        attendee_phone: Annotated[str | None, "Caller's phone number; omit if already captured"] = None,
         attendee_timezone: Annotated[str, "IANA timezone, e.g. 'Asia/Karachi'"] = "Asia/Karachi",
     ) -> str:
-        """Book a dental appointment using the email already captured from speech.
+        """Book a dental appointment using what was already captured from speech.
 
-        Call this once name, phone, slot and email are confirmed. The email is
-        owned by the code, not the model: it was captured from the caller's own
-        words and is reused here, so it is never asked for twice.
+        Call this once the date/time and email are confirmed. The email, name
+        and phone are owned by the code, not the model: they were captured from
+        the caller's own words and are reused here, so nothing is asked twice.
         """
         resolved_email = _validate_email(self._email or "patient@gmail.com")
-        resolved_phone = _normalize_phone(attendee_phone)
+        resolved_name = (self._name or attendee_name or "").strip()
+        if not resolved_name:
+            raise ToolError("I need the caller's name to book. Ask for it once.")
+        if not (self._phone or attendee_phone):
+            raise ToolError("I need the caller's phone number to book. Ask for it once.")
+        resolved_phone = _normalize_phone(self._phone or attendee_phone)
 
         body = {
             "eventTypeSlug": APPOINTMENT_SLUG,
             "username": self._username,
             "start": start_time,
             "attendee": {
-                "name": attendee_name,
+                "name": resolved_name,
                 "email": resolved_email,
                 "timeZone": attendee_timezone,
                 "phoneNumber": resolved_phone,
@@ -478,7 +522,7 @@ class CalToolset(llm.Toolset):
             f"Appointment booked successfully!\n"
             f"Booking UID: {uid}\n"
             f"Start: {start}\n"
-            f"Attendee: {attendee_name}\n"
+            f"Attendee: {resolved_name}\n"
             f"Confirmation sent to {resolved_email}\n"
             f"Contact number: {resolved_phone}"
         )
