@@ -21,7 +21,7 @@ from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.llm.tool_context import ToolError
 from livekit.plugins import ai_coustics, deepgram, openai, silero
 
-from cal_tools import DAYS, TZ, Cal, clean_email, fmt_time, now, say_when, spell_email
+from cal_tools import TZ, Cal, clean_email, fmt_time, now, say_when, spell_email
 
 logger = logging.getLogger("clinic")
 logger.setLevel(logging.INFO)
@@ -75,7 +75,6 @@ async def _one_question_only(stream):
             yield item
 
 
-
 EN_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
@@ -97,7 +96,7 @@ BOOKING, in this order:
 1. Find the day and time. Dates: {week_ahead()}. Times are 24-hour in tools (3 PM = 15:00).
    If the caller only gives one, ask for the other. Use check_availability if they ask what is free.
 2. Ask the name. Then ask the phone number.
-3. Ask the email, spelled letter by letter. If they have none, skip it.
+3. Ask the email and tell the caller to say it slowly, letter by letter. If they have none, skip it.
 4. If an email was given, call read_back_email and read EXACTLY what it returns, then wait for yes/no.
    If no: ask them to say it again, and read it back again.
 5. Call book_appointment, then tell the caller the booked time and ask if they need anything else.
@@ -106,6 +105,8 @@ RULES:
 - Never ask for something the caller already told you. Read the whole conversation before each question — if the answer is already there, use it instead of asking again.
 - Do NOT repeat or confirm the name or the phone number. Just say "Thank you" and move on.
 - Never say "booked" until book_appointment returns BOOKED.
+- Once book_appointment has returned BOOKED (or ALREADY BOOKED), the booking is finished. Never ask for the day, time, name, phone or email again, and never call book_appointment again, unless the caller clearly asks for a NEW appointment.
+- If the caller's last message is only a few letters of an email, they are still spelling it: reply only "Okay, go on." and wait.
 - If a time is not free, offer two nearby free times in one short question.
 - Stay on dental clinic topics. Answer prices, hours and services only from the info below, never invent;
   if you don't know, say the clinic team will call back.
@@ -174,11 +175,14 @@ class Assistant(Agent):
                 start = datetime.strptime(f"{date.strip()} {time.strip()}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
             except ValueError:
                 raise ToolError("date must be YYYY-MM-DD and time 24-hour HH:MM.")
+
+            # Check "already booked" BEFORE the "time has passed" / availability
+            # checks, so a repeated call right after booking never errors or re-books.
+            if self._booked == (start, digits):
+                return f"ALREADY BOOKED for {say_when(start)}. Don't book again. Just ask if they need anything else."
+
             if start <= now():
                 raise ToolError("That time has passed. Ask for a later time.")
-
-            if self._booked == (start, digits):
-                return f"ALREADY BOOKED for {say_when(start)}. Don't book again."
 
             free = await self.cal.free_slots(start.date())
             if start not in free:
@@ -189,8 +193,12 @@ class Assistant(Agent):
 
             await self.cal.book(start, name.strip() or "Patient", email_ok or self._fallback_email(digits), digits)
             self._booked = (start, digits)
+            self._pending_email = None  # booking done: forget the email state
             logger.info("BOOKED %s %s %s", start, name, digits)
-            return f"BOOKED for {say_when(start)}. Tell the caller, then ask if they need anything else."
+            return (
+                f"BOOKED for {say_when(start)}. Tell the caller the time, then ask if they need anything else. "
+                "Do not ask for any details again."
+            )
 
     @staticmethod
     def _fallback_email(digits: str) -> str:
@@ -200,8 +208,9 @@ class Assistant(Agent):
         return f"noemail+{digits}@example.com"
 
     async def llm_node(self, chat_ctx, tools, model_settings):
-        # Cap the context and keep exactly one question per reply.
-        chat_ctx.truncate(max_items=16)
+        # NOTE: no chat_ctx.truncate() here. Cutting the history made the LLM
+        # forget the name/phone/BOOKED result and ask for them again (the loop).
+        # A phone call is short; the full history is small for gpt-oss.
         stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
         if asyncio.iscoroutine(stream):
             stream = await stream
@@ -224,20 +233,43 @@ def _build_llm():
             api_key=os.environ.get("GROQ_API_KEY"),
             base_url=os.environ.get("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             reasoning_effort="low",
-            max_completion_tokens=400,  # was 80: reasoning tokens ate the whole budget -> silence
+            max_completion_tokens=600,  # reasoning tokens count too; too low = silent agent
         )
 
     return llm_mod.FallbackAdapter(
         [make(os.environ.get("LLM_MODEL", "openai/gpt-oss-120b")),
          make(os.environ.get("LLM_FALLBACK_MODEL", "openai/gpt-oss-20b"))],
-        attempt_timeout=8.0,
+        attempt_timeout=10.0,
     )
 
 
 def _prewarm(proc: JobProcess) -> None:
     proc.userdata["vad"] = silero.VAD.load(
-        activation_threshold=0.4, min_silence_duration=0.65, prefix_padding_duration=0.4
+        activation_threshold=0.5,
+        min_silence_duration=0.8,  # was 0.65: callers pause while spelling an email
+        prefix_padding_duration=0.4,
     )
+
+
+def _turn_handling() -> TurnHandlingOptions:
+    kwargs = dict(
+        turn_detection="vad",
+        # More patient: wait longer before deciding the caller has finished.
+        endpointing={"mode": "dynamic", "min_delay": 1.0, "max_delay": 4.0},
+        interruption={
+            "enabled": True,
+            "mode": "adaptive",
+            "min_duration": 0.5,
+            "min_words": 1,
+            "false_interruption_timeout": 1.5,
+        },
+    )
+    try:
+        # Don't start replying on partial transcripts (causes overlapping replies).
+        return TurnHandlingOptions(**kwargs, preemptive_generation=False)
+    except Exception:
+        logger.warning("preemptive_generation option not supported in this livekit version; skipping it")
+        return TurnHandlingOptions(**kwargs)
 
 
 server = AgentServer(setup_fnc=_prewarm)
@@ -258,18 +290,20 @@ async def my_agent(ctx: agents.JobContext):
         llm=_build_llm(),
         tts=tts_instance,
         vad=ctx.proc.userdata["vad"],
-        turn_handling=TurnHandlingOptions(
-            turn_detection="vad",
-            endpointing={"mode": "dynamic", "min_delay": 0.6, "max_delay": 2.5},
-            interruption={
-                "enabled": True,
-                "mode": "adaptive",
-                "min_duration": 0.5,
-                "min_words": 1,  # was 0: any noise cut the agent off mid-sentence
-                "false_interruption_timeout": 1.5,
-            },
-        ),
+        turn_handling=_turn_handling(),
     )
+
+    # Debug logs: see exactly what the agent hears and says.
+    @session.on("user_input_transcribed")
+    def _heard(ev):
+        if getattr(ev, "is_final", False):
+            logger.info("HEARD: %s", ev.transcript)
+
+    @session.on("conversation_item_added")
+    def _item(ev):
+        item = ev.item
+        logger.info("%s: %s", getattr(item, "role", "?"), getattr(item, "text_content", ""))
+
     await session.start(
         room=ctx.room,
         agent=Assistant(),

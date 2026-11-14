@@ -54,6 +54,10 @@ def clean_email(raw: str) -> str | None:
     if "@" not in t:
         t = re.sub(r"\s+(?:at the rate|at)\s+", "@", t)
     t = re.sub(r"\s+dot\s+", ".", t)
+    # Spoken symbols -> real symbols (callers say "underscore", "dash", ...)
+    t = re.sub(r"\s+(?:underscore|under score)\s+", "_", t)
+    t = re.sub(r"\s+(?:dash|hyphen)\s+", "-", t)
+    t = re.sub(r"\s+plus\s+", "+", t)
     t = re.sub(r"\s+", "", t).rstrip(".,;:")
     return t if EMAIL_RE.match(t) else None
 
@@ -94,6 +98,7 @@ class Cal:
                 await asyncio.sleep(0.5 * (attempt + 1))
                 continue
             if r.status_code >= 400:
+                logger.warning("Cal.com %s %s -> %s %s", method, path, r.status_code, r.text[:300])
                 raise ToolError(f"Cal.com error {r.status_code}: {r.text[:200]}")
             return r.json()
         raise ToolError("Booking system error.")
