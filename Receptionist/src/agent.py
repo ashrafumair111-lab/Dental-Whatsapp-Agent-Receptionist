@@ -265,10 +265,10 @@ def _turn_handling() -> TurnHandlingOptions:
         },
     )
     try:
-        # Don't start replying on partial transcripts (causes overlapping replies).
-        return TurnHandlingOptions(**kwargs, preemptive_generation=False)
+        # Don't start replying on partial transcripts (prevents overlapping replies).
+        return TurnHandlingOptions(**kwargs, preemptive_generation={"enabled": False})
     except Exception:
-        logger.warning("preemptive_generation option not supported in this livekit version; skipping it")
+        logger.warning("preemptive_generation option not supported; skipping it")
         return TurnHandlingOptions(**kwargs)
 
 
