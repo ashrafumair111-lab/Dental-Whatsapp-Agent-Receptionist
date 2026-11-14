@@ -19,8 +19,7 @@ from livekit.agents import Agent, AgentServer, AgentSession, JobProcess, RunCont
 from livekit.agents import llm as llm_mod
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.llm.tool_context import ToolError
-from livekit.plugins import ai_coustics, azure, deepgram, openai, silero
-from livekit.agents import tts as tts_mod
+from livekit.plugins import ai_coustics, deepgram, openai, silero
 
 from cal_tools import DAYS, TZ, Cal, clean_email, fmt_time, now, say_when, spell_email
 
@@ -37,28 +36,11 @@ SERVICES = "\n".join(f"- {s.strip()}" for s in os.environ.get("COMPANY_SERVICES"
     or "- (No service list configured; be honest about what you don't know.)"
 
 
-_URDU_SCRIPT = re.compile(r"[؀-ۿ\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
-
-_ROMAN_URDU_HINTS = {
-    "hai", "hain", "hoon", "hun", "haan", "ji", "aap", "ap", "apko", "aapko", "mera", "meri",
-    "mein", "main", "ka", "ki", "ke", "kya", "kitne", "kitna", "kisne", "kab", "kahan",
-    "kal", "aaj", "thik", "theek", "nam", "naam", "bata", "batain", "batayein", "karna",
-    "karni", "karo", "booking", "milne", "shukriya", "shukria", "hoga", "hogi",
-}
-
-
-def _looks_urdu(text: str) -> bool:
-    if _URDU_SCRIPT.search(text or ""):
-        return True
-    words = re.findall(r"[a-z']+", (text or "").lower())
-    return sum(w in _ROMAN_URDU_HINTS for w in words) >= 2
-
-
 def _cut_after_question(text: str, spoken: int) -> tuple[str, bool]:
-    i = min((x for x in (text.find("?"), text.find("؟")) if x >= 0), default=-1)
-    if i >= 0:
-        return text[: i + 1], True
-    return text, spoken > 300 and bool(re.search(r"[.!۔\n]", text))
+    cut = text.find("?")
+    if cut >= 0:
+        return text[: cut + 1], True
+    return text, spoken > 300 and bool(re.search(r"[.!\n]", text))
 
 
 async def _one_question_only(stream):
@@ -93,39 +75,8 @@ async def _one_question_only(stream):
             yield item
 
 
-class BilingualTTS(tts_mod.TTS):
-    """Urdu script -> Azure ur-PK-AsadNeural; anything else -> Deepgram Aura."""
 
-    def __init__(self) -> None:
-        english = deepgram.TTS(model=os.environ.get("TTS_EN_MODEL", "aura-2-arcas-en"))
-        urdu = azure.TTS(voice=os.environ.get("TTS_UR_VOICE", "ur-PK-AsadNeural"))
-        super().__init__(
-            capabilities=tts_mod.TTSCapabilities(streaming=False),
-            sample_rate=english.sample_rate,
-            num_channels=1,
-        )
-        self._english = english
-        self._urdu = urdu
-
-    @property
-    def model(self) -> str:
-        return "aura+azure"
-
-    @property
-    def provider(self) -> str:
-        return "deepgram+azure"
-
-    def synthesize(self, text: str, *, conn_options=None) -> tts_mod.ChunkedStream:
-        kwargs = {} if conn_options is None else {"conn_options": conn_options}
-        engine = self._urdu if _looks_urdu(text) else self._english
-        return engine.synthesize(text, **kwargs)
-
-    async def aclose(self) -> None:
-        await self._english.aclose()
-        await self._urdu.aclose()
-
-
-UR_DAYS = ["پیر", "منگل", "بدھ", "جمعرات", "جمعہ", "ہفتہ", "اتوار"]
+EN_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
 def week_ahead() -> str:
@@ -133,35 +84,36 @@ def week_ahead() -> str:
     rows = []
     for i in range(8):
         d = today + timedelta(days=i)
-        tag = " (آج)" if i == 0 else " (کل)" if i == 1 else ""
-        rows.append(f"{UR_DAYS[d.weekday()]} = {d:%Y-%m-%d}{tag}")
+        tag = " (today)" if i == 0 else " (tomorrow)" if i == 1 else ""
+        rows.append(f"{EN_DAYS[d.weekday()]} = {d:%Y-%m-%d}{tag}")
     return "; ".join(rows)
 
 
 def instructions() -> str:
-    return f"""آپ ڈینٹل کلینک کے فرینڈلی ریسپشنسٹ مائیک ہیں، ایک لائیو فون کال پر۔ پورے جواب صرف اردو میں دیں — انگریزی الفاظ استعمال نہ کریں (صرف اشد ضروری بات، جیسے دوائی کے نام یا ویسے عام نام)۔ہر جواب 1-2 چھوٹی جملوں کا ہو اور ہمیشہ صرف ایک ہی سوال کریں۔
+    return f"""You are Mike, the friendly receptionist at {COMPANY}, on a live phone call.
+Reply in English only. Keep every reply to 1-2 short sentences and ask only ONE question at a time.
 
-بکنگ کا ترتیب یہ ہے:
-1. پہلے دن اور وقت پوچھیں۔ تاریخیں: {week_ahead()}۔ ٹائم 24 گھنٹے ٹائم میں tools میں (3 بجے = 15:00)۔
-   اگر ایک بات ملی ہے تو دوسری پوچھیں۔ اگر مَریز پوچھے "کون سے ٹائم فارغ ہے" تو check_availability استعمال کریں۔
-2. نام پوچھیں۔ پھر فون نمبر پوچھیں۔
-3. ای میل پوچھیں، ہجے کے ساتھ۔ اگر مَریز کے پاس ای میل نہ ہو تو چھوڑ دیں۔
-4. اگر ای میل دی گئی ہے تو read_back_email کال کریں اور بالکل وہی الفاظ پڑھ کر سنائیں جو ٹول دے، پھر ہاں یا نہیں کا انتظار کریں۔
-   اگر نہیں تو ای میل دوبارہ کہلوائیں اور جواب دوبارہ پڑھ کر سنائیں۔
-5. phir book_appointment کال کریں اور مَریز کو بکنگ کا وقت بتا کر پوچھیں کچھ اور مدد چاہیے یا نہیں۔
+BOOKING, in this order:
+1. Find the day and time. Dates: {week_ahead()}. Times are 24-hour in tools (3 PM = 15:00).
+   If the caller only gives one, ask for the other. Use check_availability if they ask what is free.
+2. Ask the name. Then ask the phone number.
+3. Ask the email, spelled letter by letter. If they have none, skip it.
+4. If an email was given, call read_back_email and read EXACTLY what it returns, then wait for yes/no.
+   If no: ask them to say it again, and read it back again.
+5. Call book_appointment, then tell the caller the booked time and ask if they need anything else.
 
-اصول:
-- جو چیز مَریز پہلے بتا چکا ہو، وہ کبھی دوبارہ نہ پوچھیں۔ ہر سوال کرنے سے پہلے پوری بات چیت پڑھیں — اگر جواب پہلے ہی موجود ہے تو اس کا استعمال کریں، دوبارہ نہ پوچھیں۔
-- نام اور فون نمبر کبھی دہرائیے نہیں۔ صرف "شکریہ" کہہ کر آگے بڑھیں۔
-- "بکنگ ہو گئی" جب ہی کہیں جب book_appointment BOOKED دے۔
-- اگر جو ٹائم مانگا ہے وہ فارغ نہیں تو دو نزدیک کے وقت ایک مختصر سوال میں پیش کریں۔
-- صرف ڈینٹل کلینک کے موضوع پر رہیں۔ قیمتیں، گھنٹے اور سروسز صرف نیچے دی معلومات سے؛ کبھی ایجاد نہ کریں۔
-  اگر معلومات نہ ہوں تو کہیں کہ کلینک ٹیم واپس کال کرے گی۔
+RULES:
+- Never ask for something the caller already told you. Read the whole conversation before each question — if the answer is already there, use it instead of asking again.
+- Do NOT repeat or confirm the name or the phone number. Just say "Thank you" and move on.
+- Never say "booked" until book_appointment returns BOOKED.
+- If a time is not free, offer two nearby free times in one short question.
+- Stay on dental clinic topics. Answer prices, hours and services only from the info below, never invent;
+  if you don't know, say the clinic team will call back.
 
-کلینک: {LEGAL}, {ADDRESS}. فون {PHONE}. ای میل {EMAIL}.
-خدمات:
+Clinic: {LEGAL}, {ADDRESS}. Phone {PHONE}. Email {EMAIL}.
+Services:
 {SERVICES}
-آج: {now():%A, %Y-%m-%d}۔ وزٹ 30 منٹ کا ہے۔"""
+Today: {now():%A, %Y-%m-%d}. A visit is 30 minutes."""
 
 
 class Assistant(Agent):
@@ -258,7 +210,7 @@ class Assistant(Agent):
 
     # ----------------------------- lifecycle ------------------------------ #
     async def on_enter(self) -> None:
-        self.session.say("السلام علیکم! یہ عمر اشرف ڈینٹل کلینک ہے، میں مائیک ہوں۔ بتائیے، کیا مدد کر سکتا ہوں؟")
+        self.session.say(f"Hi, this is Mike from {COMPANY}. How may I help you today?")
 
     async def on_exit(self) -> None:
         await self.cal.aclose()
@@ -299,10 +251,10 @@ async def my_agent(ctx: agents.JobContext):
             model=ai_coustics.EnhancerModel.QUAIL_VF_S
         )
 
-    tts_instance = BilingualTTS()
+    tts_instance = deepgram.TTS(model=os.environ.get("TTS_EN_MODEL", "aura-2-arcas-en"))
 
     session = AgentSession(
-        stt=deepgram.STT(model=os.environ.get("STT_MODEL", "nova-3").split("/")[-1], language="ur"),
+        stt=deepgram.STT(model=os.environ.get("STT_MODEL", "nova-3").split("/")[-1], language="en"),
         llm=_build_llm(),
         tts=tts_instance,
         vad=ctx.proc.userdata["vad"],
