@@ -204,7 +204,6 @@ async def my_agent(ctx: agents.JobContext):
     tts_instance = elevenlabs.TTS(
         voice_id=os.environ.get("ELEVEN_VOICE_ID", "onwK4e9ZLuTAKqWW03F9"),
         model=os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2"),
-        language="ur",
     )
     # Open the ElevenLabs websocket now so the first reply doesn't wait on a cold connect.
     tts_instance.prewarm()
