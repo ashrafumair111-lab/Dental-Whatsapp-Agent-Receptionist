@@ -19,7 +19,8 @@ from livekit.agents import Agent, AgentServer, AgentSession, JobProcess, RunCont
 from livekit.agents import llm as llm_mod
 from livekit.agents.beta.tools import EndCallTool
 from livekit.agents.llm.tool_context import ToolError
-from livekit.plugins import ai_coustics, deepgram, elevenlabs, openai, silero
+from livekit.plugins import ai_coustics, azure, deepgram, openai, silero
+from livekit.agents import tts as tts_mod
 
 from cal_tools import DAYS, TZ, Cal, clean_email, fmt_time, now, say_when, spell_email
 
@@ -34,6 +35,94 @@ PHONE = os.environ.get("COMPANY_PHONE", "")
 EMAIL = os.environ.get("COMPANY_EMAIL", "")
 SERVICES = "\n".join(f"- {s.strip()}" for s in os.environ.get("COMPANY_SERVICES", "").split(";") if s.strip()) \
     or "- (No service list configured; be honest about what you don't know.)"
+
+
+_URDU_SCRIPT = re.compile(r"[؀-ۿ\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
+
+_ROMAN_URDU_HINTS = {
+    "hai", "hain", "hoon", "hun", "haan", "ji", "aap", "ap", "apko", "aapko", "mera", "meri",
+    "mein", "main", "ka", "ki", "ke", "kya", "kitne", "kitna", "kisne", "kab", "kahan",
+    "kal", "aaj", "thik", "theek", "nam", "naam", "bata", "batain", "batayein", "karna",
+    "karni", "karo", "booking", "milne", "shukriya", "shukria", "hoga", "hogi",
+}
+
+
+def _looks_urdu(text: str) -> bool:
+    if _URDU_SCRIPT.search(text or ""):
+        return True
+    words = re.findall(r"[a-z']+", (text or "").lower())
+    return sum(w in _ROMAN_URDU_HINTS for w in words) >= 2
+
+
+def _cut_after_question(text: str, spoken: int) -> tuple[str, bool]:
+    i = min((x for x in (text.find("?"), text.find("؟")) if x >= 0), default=-1)
+    if i >= 0:
+        return text[: i + 1], True
+    return text, spoken > 300 and bool(re.search(r"[.!۔\n]", text))
+
+
+async def _one_question_only(stream):
+    """Let at most one question through; drop the rest of the reply."""
+    spoken = 0
+    finished = False
+    async for item in stream:
+        if isinstance(item, str):
+            if finished:
+                continue
+            text, finished = _cut_after_question(item, spoken)
+            spoken += len(text)
+            if text:
+                yield text
+            continue
+        delta = getattr(item, "delta", None)
+        content = getattr(delta, "content", None) if delta is not None else None
+        if delta is None or not content:
+            yield item
+            continue
+        if finished:
+            text = ""
+        else:
+            text, finished = _cut_after_question(content, spoken)
+            spoken += len(text)
+        if text:
+            if text != content:
+                item.delta.content = text
+            yield item
+        elif getattr(delta, "tool_calls", None):
+            item.delta.content = None
+            yield item
+
+
+class BilingualTTS(tts_mod.TTS):
+    """Urdu script -> Azure ur-PK-AsadNeural; anything else -> Deepgram Aura."""
+
+    def __init__(self) -> None:
+        english = deepgram.TTS(model=os.environ.get("TTS_EN_MODEL", "aura-2-arcas-en"))
+        urdu = azure.TTS(voice=os.environ.get("TTS_UR_VOICE", "ur-PK-AsadNeural"))
+        super().__init__(
+            capabilities=tts_mod.TTSCapabilities(streaming=False),
+            sample_rate=english.sample_rate,
+            num_channels=1,
+        )
+        self._english = english
+        self._urdu = urdu
+
+    @property
+    def model(self) -> str:
+        return "aura+azure"
+
+    @property
+    def provider(self) -> str:
+        return "deepgram+azure"
+
+    def synthesize(self, text: str, *, conn_options=None) -> tts_mod.ChunkedStream:
+        kwargs = {} if conn_options is None else {"conn_options": conn_options}
+        engine = self._urdu if _looks_urdu(text) else self._english
+        return engine.synthesize(text, **kwargs)
+
+    async def aclose(self) -> None:
+        await self._english.aclose()
+        await self._urdu.aclose()
 
 
 UR_DAYS = ["پیر", "منگل", "بدھ", "جمعرات", "جمعہ", "ہفتہ", "اتوار"]
@@ -158,6 +247,15 @@ class Assistant(Agent):
             return f"{local.split('+')[0]}+{digits}@{domain}"
         return f"noemail+{digits}@example.com"
 
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        # Cap the context and keep exactly one question per reply.
+        chat_ctx.truncate(max_items=16)
+        stream = Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+        if asyncio.iscoroutine(stream):
+            stream = await stream
+        async for item in _one_question_only(stream):
+            yield item
+
     # ----------------------------- lifecycle ------------------------------ #
     async def on_enter(self) -> None:
         self.session.say("السلام علیکم! یہ عمر اشرف ڈینٹل کلینک ہے، میں مائیک ہوں۔ بتائیے، کیا مدد کر سکتا ہوں؟")
@@ -201,12 +299,7 @@ async def my_agent(ctx: agents.JobContext):
             model=ai_coustics.EnhancerModel.QUAIL_VF_S
         )
 
-    tts_instance = elevenlabs.TTS(
-        voice_id=os.environ.get("ELEVEN_VOICE_ID", "onwK4e9ZLuTAKqWW03F9"),
-        model=os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2"),
-    )
-    # Open the ElevenLabs websocket now so the first reply doesn't wait on a cold connect.
-    tts_instance.prewarm()
+    tts_instance = BilingualTTS()
 
     session = AgentSession(
         stt=deepgram.STT(model=os.environ.get("STT_MODEL", "nova-3").split("/")[-1], language="ur"),
