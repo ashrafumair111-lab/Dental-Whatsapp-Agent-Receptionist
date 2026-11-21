@@ -20,47 +20,30 @@ function Get-EnvVar([string]$name) {
     return $null
 }
 
-# ---- 1. Four Messenger env vars on the site (update or create) ----
+# ---- 1. Messenger env vars must already exist on the site (set in the UI) ----
 $pageId = Get-EnvVar 'MESSENGER_PAGE_ID'
 if (-not $pageId) { $pageId = Get-EnvVar 'messenger_page_id' }
-$want = [ordered]@{
-    MESSENGER_VERIFY_TOKEN      = (Get-EnvVar 'MESSENGER_VERIFY_TOKEN')
-    MESSENGER_PAGE_ACCESS_TOKEN = (Get-EnvVar 'MESSENGER_PAGE_ACCESS_TOKEN')
-    MESSENGER_APP_SECRET        = (Get-EnvVar 'MESSENGER_APP_SECRET')
-    MESSENGER_PAGE_ID           = $pageId
-}
-foreach ($k in $want.Keys) {
-    if (-not $want[$k]) { Write-Host "MISSING local value for $k"; exit 1 }
+$want = @(
+    'MESSENGER_VERIFY_TOKEN',
+    'MESSENGER_PAGE_ACCESS_TOKEN',
+    'MESSENGER_APP_SECRET',
+    'MESSENGER_PAGE_ID'
+)
+foreach ($k in $want) {
+    $local = Get-EnvVar $k
+    if (-not $local) { Write-Host "MISSING local value for $k"; exit 1 }
 }
 
-# ---- 1. Four Messenger env vars on the site (update or create) ----
-$account = (Invoke-RestMethod -Uri 'https://api.netlify.com/api/v1/accounts' -Headers $headers)[0]
-$envBase = "https://api.netlify.com/api/v1/accounts/$($account.slug)/env"
-$envUrl = "$envBase`?site_id=$siteId"
 $existing = Invoke-RestMethod -Uri "https://api.netlify.com/api/v1/sites/$siteId/env" -Headers $headers
 $existingKeys = @{}
 foreach ($e in $existing) { $existingKeys[$e.key] = $true }
 
-$newVars = @()
-foreach ($k in $want.Keys) {
-    $var = @{
-        key    = $k
-        scopes = @('builds', 'functions', 'runtime', 'post_processing')
-        values = @(@{ context = 'production'; value = $want[$k] })
-    }
-    if ($existingKeys.ContainsKey($k)) {
-        Invoke-RestMethod -Method Put -Uri "$envBase/$k`?site_id=$siteId" -Headers $headers -ContentType 'application/json' `
-            -Body (ConvertTo-Json $var -Depth 6 -Compress) | Out-Null
-        Write-Host "updated env $k"
-    } else {
-        $newVars += $var
-    }
+$missing = @($want | Where-Object { -not $existingKeys.ContainsKey($_) })
+if ($missing.Count -gt 0) {
+    Write-Host ("MISSING on site: " + ($missing -join ', ') + " - add in Netlify UI, then re-run")
+    exit 1
 }
-if ($newVars.Count -gt 0) {
-    Invoke-RestMethod -Method Post -Uri $envUrl -Headers $headers -ContentType 'application/json' `
-        -Body (ConvertTo-Json $newVars -Depth 6 -Compress) | Out-Null
-    Write-Host "created env: $(($newVars | ForEach-Object { $_.key }) -join ', ')"
-}
+Write-Host ("env OK on site: " + ($want -join ', '))
 
 # ---- 2. Zip the deployable site (functions bundle server-side; no node_modules) ----
 $stage = Join-Path $tmp 'stage'

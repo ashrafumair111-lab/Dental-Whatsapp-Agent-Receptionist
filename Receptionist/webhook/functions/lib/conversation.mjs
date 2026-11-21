@@ -49,6 +49,24 @@ export function trimHistory(messages, max = 24) {
   return filtered.slice(-max);
 }
 
+/**
+ * Best-effort replay guard: Meta re-delivers a webhook when a run is slow.
+ * Returns true if this message id was already handled recently.
+ */
+export async function seenRecently(id, ttlMs = 10 * 60 * 1000) {
+  try {
+    const store = blobsStore();
+    const key = `seen:${id}`;
+    const prev = await store.get(key, { type: 'json' });
+    if (prev && now() - Number(prev.at ?? 0) < ttlMs) return true;
+    await store.setJSON(key, { at: now() });
+    return false;
+  } catch (err) {
+    console.error('seenRecently failed (allowing message):', err?.message ?? err);
+    return false;
+  }
+}
+
 export async function saveHistory(waId, history) {
   try {
     const store = blobsStore();

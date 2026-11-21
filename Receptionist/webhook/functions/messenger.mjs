@@ -19,7 +19,7 @@
 //   DEEPGRAM_API_KEY             - audio transcription (optional)
 
 import crypto from 'node:crypto';
-import { loadHistory, saveHistory } from './lib/conversation.mjs';
+import { loadHistory, saveHistory, seenRecently } from './lib/conversation.mjs';
 import { runAgent } from './lib/agent.mjs';
 
 const VERIFY_TOKEN = process.env.MESSENGER_VERIFY_TOKEN ?? '';
@@ -113,6 +113,16 @@ async function handleMessage(message) {
   const psid = message?.sender?.id;
   if (!psid) return null;
 
+  // Never answer our own outgoing messages (echo delivery) - that would loop.
+  if (message?.message?.is_echo) return null;
+
+  // Meta retries a webhook if the run is slow; answer each message id once.
+  const mid = message?.message?.mid;
+  if (mid && (await seenRecently(mid))) {
+    console.log('duplicate webhook delivery skipped', mid);
+    return null;
+  }
+
   let text = (message?.message?.text ?? '').trim();
   if (!text && Array.isArray(message?.message?.attachments) && message.message.attachments.length > 0) {
     const att = message.message.attachments[0];
@@ -132,14 +142,14 @@ async function handleMessage(message) {
   if (!text) return null;
 
   const cal = { apiKey: CAL_API_KEY, username: CAL_USERNAME, groqApiKey: GROQ_API_KEY };
-  // Separate memory namespace from WhatsApp so a person who uses both keeps
-  // two independent conversations.
-  const history = await loadHistory(`wa:${psid}`);
+  // Same memory as WhatsApp: loadHistory/saveHistory already namespace the key
+  // as `wa:<id>`, so pass the PSID as-is.
+  const history = await loadHistory(psid);
   let botReply = 'Sorry, I am having a little trouble right now — please try again in a minute.';
   try {
     const result = await runAgent({ waId: psid, text, history, cal });
     botReply = result.reply;
-    await saveHistory(`wa:${psid}`, result.messages);
+    await saveHistory(psid, result.messages);
   } catch (err) {
     console.error('runAgent failed:', err?.message ?? err);
   }
