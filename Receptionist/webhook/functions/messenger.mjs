@@ -134,12 +134,12 @@ async function handleMessage(message) {
   const cal = { apiKey: CAL_API_KEY, username: CAL_USERNAME, groqApiKey: GROQ_API_KEY };
   // Separate memory namespace from WhatsApp so a person who uses both keeps
   // two independent conversations.
-  const history = await loadHistory(`msgr:${psid}`);
+  const history = await loadHistory(`wa:${psid}`);
   let botReply = 'Sorry, I am having a little trouble right now — please try again in a minute.';
   try {
     const result = await runAgent({ waId: psid, text, history, cal });
     botReply = result.reply;
-    await saveHistory(`msgr:${psid}`, result.messages);
+    await saveHistory(`wa:${psid}`, result.messages);
   } catch (err) {
     console.error('runAgent failed:', err?.message ?? err);
   }
