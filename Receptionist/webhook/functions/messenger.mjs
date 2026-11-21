@@ -26,13 +26,13 @@ const VERIFY_TOKEN = process.env.MESSENGER_VERIFY_TOKEN ?? '';
 const PAGE_TOKEN = process.env.MESSENGER_PAGE_ACCESS_TOKEN ?? '';
 const APP_SECRET = process.env.MESSENGER_APP_SECRET ?? '';
 const PAGE_ID = process.env.MESSENGER_PAGE_ID ?? process.env.messenger_page_id ?? '';
-const CLOUD_API_VERSION = process.env.WHATSAPP_CLOUD_API_VERSION ?? 'v21.0';
+const CLOUD_API_VERSION = (process.env.WHATSAPP_CLOUD_API_VERSION ?? '21.0').replace(/^v/, '');
 const CAL_API_KEY = process.env.CAL_API_KEY ?? '';
 const CAL_USERNAME = process.env.CAL_USERNAME ?? '';
 const GROQ_API_KEY = process.env.GROQ_API_KEY ?? '';
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY ?? '';
 
-const GRAPH_BASE = `https://graph.facebook.com/${CLOUD_API_VERSION}`;
+const GRAPH_BASE = `https://graph.facebook.com/v${CLOUD_API_VERSION}`;
 
 function reply(statusCode, body, headers = {}) {
   return {
