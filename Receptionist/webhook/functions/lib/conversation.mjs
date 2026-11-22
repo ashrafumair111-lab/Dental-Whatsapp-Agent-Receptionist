@@ -9,7 +9,7 @@ const STORE_NAME = 'conversations';
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 min of silence = fresh conversation
 
 function blobsStore() {
-  const siteID = process.env.SITE_ID;
+  const siteID = process.env.BLOBS_SITE_ID || process.env.SITE_ID;
   const token = process.env.NETLIFY_BLOBS_TOKEN;
   if (siteID && token) {
     try {
