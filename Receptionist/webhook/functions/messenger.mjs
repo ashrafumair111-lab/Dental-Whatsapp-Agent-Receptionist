@@ -143,8 +143,10 @@ async function handleMessage(message) {
 
   const cal = { apiKey: CAL_API_KEY, username: CAL_USERNAME, groqApiKey: GROQ_API_KEY };
   // Same memory as WhatsApp: loadHistory/saveHistory already namespace the key
-  // as `wa:<id>`, so pass the PSID as-is.
+  // as `wa:<id>`, so pass the PSID as-is. psid is read from sender.id only
+  // (echo events returned earlier), so read and write use the same ID.
   const history = await loadHistory(psid);
+  console.log(`mike loaded history for ${psid}: ${history.length} msgs`);
   let botReply = 'Sorry, I am having a little trouble right now — please try again in a minute.';
   try {
     const result = await runAgent({ waId: psid, text, history, cal });
